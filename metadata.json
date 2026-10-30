@@ -1,0 +1,6 @@
+{
+  "name": "VoiceBridge AI",
+  "description": "Multilingual voice-first AI assistant for public services, healthcare administration, and scholarship workflows in English, Hindi, and Telugu.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
