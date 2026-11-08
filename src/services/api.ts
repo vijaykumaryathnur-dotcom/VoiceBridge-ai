@@ -257,6 +257,7 @@ export async function transcribeAudio(
 }
 
 // Gemini Live API Audio Client Helper (gemini-3.8-live)
+// Gemini Live API Audio Client Helper (gemini-3.8-live)
 // Supports both Direct Browser-to-Gemini WebSocket (for Vercel & serverless) and Server Proxy Bridge (for standalone Node / Cloud Run)
 export class GeminiLiveSession {
   private ws: WebSocket | null = null;
@@ -269,19 +270,36 @@ export class GeminiLiveSession {
   private isDirectConnection: boolean = false;
   private activeSources: AudioBufferSourceNode[] = [];
 
+  // Voice Activity Detection (VAD) & Conversational Turn State
+  private isUserSpeaking: boolean = false;
+  private speechStartTime: number = 0;
+  private lastSpeechTime: number = 0;
+  private silenceTimer: any = null;
+  private isTurnCompletePending: boolean = false;
+  private modelPlaybackStartTime: number = 0;
+  private hasReceivedFirstModelTurn: boolean = false;
+
   public language: SupportedLanguage = 'en';
   public voiceName: string = 'Aoede';
   public page: string = 'assistant';
   public topic: string = '';
 
-  public onStatusChange?: (status: 'connecting' | 'connected' | 'error' | 'disconnected', error?: string) => void;
+  public onStatusChange?: (
+    status: 'connecting' | 'connected' | 'listening' | 'thinking' | 'speaking' | 'error' | 'disconnected',
+    error?: string
+  ) => void;
   public onAudioActivity?: (level: number, source: 'mic' | 'model') => void;
   public onInputTranscript?: (text: string) => void;
   public onOutputTranscript?: (text: string) => void;
   public onInterrupted?: () => void;
   public onTurnComplete?: () => void;
 
-  constructor(language: SupportedLanguage = 'en', voiceName: string = 'Aoede', page: string = 'assistant', topic: string = '') {
+  constructor(
+    language: SupportedLanguage = 'en',
+    voiceName: string = 'Aoede',
+    page: string = 'assistant',
+    topic: string = ''
+  ) {
     this.language = language;
     this.voiceName = voiceName;
     this.page = page;
@@ -301,6 +319,19 @@ export class GeminiLiveSession {
     this.stop();
     this.onStatusChange?.('connecting');
 
+    // 0. Crucial: Initialize & resume AudioContext immediately inside user gesture context (browser Autoplay policy)
+    try {
+      if (!this.outputAudioCtx) {
+        this.outputAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      if (this.outputAudioCtx.state === 'suspended') {
+        await this.outputAudioCtx.resume();
+        console.log('[GeminiLiveSession] Output AudioContext unlocked and resumed on user interaction.');
+      }
+    } catch (e) {
+      console.warn('[GeminiLiveSession] Note on output AudioContext resume:', e);
+    }
+
     // 1. Fetch live session authorization & configuration from backend
     let sessionConfig: any = null;
     try {
@@ -309,12 +340,14 @@ export class GeminiLiveSession {
         sessionConfig = await res.json();
       }
     } catch (err) {
-      console.warn('[GeminiLiveSession] /api/live-session check:', err);
+      console.warn('[GeminiLiveSession] /api/live-session check error:', err);
     }
 
     // 2. If backend explicitly reports key missing or configuration error
     if (sessionConfig && sessionConfig.configured === false) {
-      const errorMsg = sessionConfig.error || 'GEMINI_API_KEY is not configured on the server. Please add GEMINI_API_KEY to your Vercel Project Settings > Environment Variables and redeploy.';
+      const errorMsg =
+        sessionConfig.error ||
+        'GEMINI_API_KEY is not configured on the server. Please add GEMINI_API_KEY to your Vercel Project Settings > Environment Variables and redeploy.';
       console.error('[GeminiLiveSession Config Error]:', errorMsg);
       this.onStatusChange?.('error', errorMsg);
       return;
@@ -328,7 +361,8 @@ export class GeminiLiveSession {
 
     // 3. Ephemeral token and endpoint provided by secure backend
     const ephemeralToken: string | undefined = sessionConfig?.token;
-    const endpoint: string = sessionConfig?.websocketEndpoint ||
+    const endpoint: string =
+      sessionConfig?.websocketEndpoint ||
       'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained';
     const isVercelHost = window.location.hostname.includes('vercel.app');
 
@@ -341,7 +375,10 @@ export class GeminiLiveSession {
         this.connectDirectWebSocket(ephemeralToken, endpoint);
         return;
       } else {
-        this.onStatusChange?.('error', 'Ephemeral session token not received. Please verify GEMINI_API_KEY in Vercel settings.');
+        this.onStatusChange?.(
+          'error',
+          'Ephemeral session token not received. Please verify GEMINI_API_KEY in Vercel settings.'
+        );
         return;
       }
     }
@@ -355,6 +392,8 @@ export class GeminiLiveSession {
 
   private connectDirectWebSocket(ephemeralToken: string, endpointUrl: string) {
     const wsUrl = `${endpointUrl}?access_token=${ephemeralToken}`;
+    console.log('[GeminiLiveSession Direct] Establishing WebSocket to:', endpointUrl);
+
     try {
       this.ws = new WebSocket(wsUrl);
       this.ws.binaryType = 'arraybuffer';
@@ -365,8 +404,9 @@ export class GeminiLiveSession {
     }
 
     this.ws.onopen = () => {
-      console.log('[GeminiLiveSession Direct] WebSocket opened with ephemeral token. Sending setup frame...');
-      const targetLanguageName = this.language === 'te' ? 'Telugu (తెలుగు)' : this.language === 'hi' ? 'Hindi (हिन्दी)' : 'Indian English';
+      console.log('[GeminiLiveSession Direct] WebSocket opened with ephemeral token. Transmitting setup frame...');
+      const targetLanguageName =
+        this.language === 'te' ? 'Telugu (తెలుగు)' : this.language === 'hi' ? 'Hindi (हिन्दी)' : 'Indian English';
       const systemInstruction = `You are VoiceBridge AI, a warm, patient, and conversational voice companion assisting citizens with public services, education scholarships, healthcare schemes, and general everyday inquiries.
 Target Language: ${targetLanguageName}
 
@@ -422,39 +462,58 @@ ${this.page ? `Current App Screen: ${this.page}` : ''}`;
         const msg = JSON.parse(textData);
 
         if (msg.setupComplete) {
-          console.log('[GeminiLiveSession Direct] Setup completed by Gemini 3.8 Live API');
+          console.log('[GeminiLiveSession Direct] Setup completed successfully by Gemini 3.8 Live API.');
+          this.onStatusChange?.('listening');
         }
 
         // Handle model audio output (24kHz PCM)
         const parts = msg.serverContent?.modelTurn?.parts || [];
-        for (const part of parts) {
-          if (part.inlineData?.data) {
-            this.playPcm24k(part.inlineData.data);
+        if (parts.length > 0) {
+          for (const part of parts) {
+            if (part.inlineData?.data) {
+              this.playPcm24k(part.inlineData.data);
+            }
           }
         }
 
         // User speech transcription
         if (msg.serverContent?.inputTranscription?.text) {
+          console.log('[GeminiLiveSession Direct] User transcription:', msg.serverContent.inputTranscription.text);
           this.onInputTranscript?.(msg.serverContent.inputTranscription.text);
         }
 
         // Model spoken speech transcription
         if (msg.serverContent?.outputTranscription?.text) {
           this.onOutputTranscript?.(msg.serverContent.outputTranscription.text);
+          this.onStatusChange?.('speaking');
         }
 
-        // Interruption
+        // Interruption by user
         if (msg.serverContent?.interrupted) {
+          console.log('[GeminiLiveSession Direct] Server signaled interruption.');
           this.stopAllAudioPlayback();
+          this.isTurnCompletePending = false;
+          this.hasReceivedFirstModelTurn = false;
           this.onInterrupted?.();
+          this.onStatusChange?.('listening');
         }
 
-        // Turn complete
-        if (msg.serverContent?.turnComplete) {
-          this.onTurnComplete?.();
+        // Turn or generation complete from Gemini Live API
+        if (msg.serverContent?.generationComplete || msg.serverContent?.turnComplete) {
+          console.log(
+            `[GeminiLiveSession Direct] Generation completed by Gemini. Active audio buffers playing: ${this.activeSources.length}`
+          );
+          if (this.activeSources.length > 0) {
+            this.isTurnCompletePending = true;
+          } else {
+            this.isTurnCompletePending = false;
+            this.hasReceivedFirstModelTurn = false;
+            this.onStatusChange?.('listening');
+            this.onTurnComplete?.();
+          }
         }
       } catch (err) {
-        console.warn('[GeminiLiveSession Direct] Message parsing note:', err);
+        console.warn('[GeminiLiveSession Direct] Message parsing error:', err);
       }
     };
 
@@ -508,6 +567,7 @@ ${this.page ? `Current App Screen: ${this.page}` : ''}`;
     this.ws.onopen = () => {
       this.isConnected = true;
       this.onStatusChange?.('connected');
+      this.onStatusChange?.('listening');
       this.initMicStream();
     };
 
@@ -522,14 +582,25 @@ ${this.page ? `Current App Screen: ${this.page}` : ''}`;
           this.onInputTranscript?.(msg.inputTranscript);
         } else if (msg.outputTranscript) {
           this.onOutputTranscript?.(msg.outputTranscript);
+          this.onStatusChange?.('speaking');
         } else if (msg.interrupted) {
           this.stopAllAudioPlayback();
+          this.isTurnCompletePending = false;
+          this.hasReceivedFirstModelTurn = false;
           this.onInterrupted?.();
-        } else if (msg.turnComplete) {
-          this.onTurnComplete?.();
+          this.onStatusChange?.('listening');
+        } else if (msg.turnComplete || msg.generationComplete) {
+          if (this.activeSources.length > 0) {
+            this.isTurnCompletePending = true;
+          } else {
+            this.isTurnCompletePending = false;
+            this.hasReceivedFirstModelTurn = false;
+            this.onStatusChange?.('listening');
+            this.onTurnComplete?.();
+          }
         }
       } catch (err) {
-        console.warn('Live API WebSocket parse error:', err);
+        console.warn('Live API WebSocket proxy parse error:', err);
       }
     };
 
@@ -560,6 +631,46 @@ ${this.page ? `Current App Screen: ${this.page}` : ''}`;
     };
   }
 
+  // Linear interpolation resampling to exact 16,000Hz PCM
+  private resampleTo16k(input: Float32Array, inputSampleRate: number): Int16Array {
+    if (inputSampleRate === 16000) {
+      const pcm16 = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        const s = Math.max(-1, Math.min(1, input[i]));
+        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      return pcm16;
+    }
+
+    const ratio = inputSampleRate / 16000;
+    const outputLength = Math.floor(input.length / ratio);
+    const pcm16 = new Int16Array(outputLength);
+
+    for (let i = 0; i < outputLength; i++) {
+      const srcIndex = Math.floor(i * ratio);
+      const s = Math.max(-1, Math.min(1, input[srcIndex]));
+      pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return pcm16;
+  }
+
+  // Explicit conversational turn complete trigger (ends user turn, requests model answer)
+  public sendTurnComplete() {
+    if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    console.log('[GeminiLiveSession] Dispatching turnComplete signal to Gemini Live API. State -> thinking');
+    this.onStatusChange?.('thinking');
+
+    if (this.isDirectConnection) {
+      this.ws.send(JSON.stringify({
+        clientContent: {
+          turnComplete: true
+        }
+      }));
+    } else {
+      this.ws.send(JSON.stringify({ turnComplete: true }));
+    }
+  }
+
   private async initMicStream() {
     try {
       this.micStream = await navigator.mediaDevices.getUserMedia({
@@ -572,9 +683,9 @@ ${this.page ? `Current App Screen: ${this.page}` : ''}`;
         }
       });
 
-      this.inputAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
-      this.outputAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      this.nextStartTime = this.outputAudioCtx.currentTime;
+      this.inputAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const actualSampleRate = this.inputAudioCtx.sampleRate;
+      console.log(`[GeminiLiveSession] Microphone input AudioContext initialized at ${actualSampleRate}Hz.`);
 
       const source = this.inputAudioCtx.createMediaStreamSource(this.micStream);
       this.processor = this.inputAudioCtx.createScriptProcessor(4096, 1, 1);
@@ -586,27 +697,69 @@ ${this.page ? `Current App Screen: ${this.page}` : ''}`;
         if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
         const channelData = e.inputBuffer.getChannelData(0);
 
-        // Compute mic activity level for live visual orb
-        let sum = 0;
+        // Compute RMS volume level for activity visualizer & VAD
+        let sumSquares = 0;
         for (let i = 0; i < channelData.length; i++) {
-          sum += Math.abs(channelData[i]);
+          sumSquares += channelData[i] * channelData[i];
         }
-        const level = Math.min(1, (sum / channelData.length) * 5.5);
+        const rms = Math.sqrt(sumSquares / channelData.length);
+        const level = Math.min(1, rms * 5.5);
         this.onAudioActivity?.(level, 'mic');
 
-        // Automatic user speech barge-in: If user starts speaking while model audio is playing, interrupt model
-        if (level > 0.12 && this.activeSources.length > 0) {
+        const now = Date.now();
+        const SPEECH_START_THRESHOLD = 0.022; // Vocal energy threshold
+        const BARGE_IN_THRESHOLD = 0.22;      // Higher threshold to avoid speaker echo
+        const SILENCE_TIMEOUT_MS = 1000;      // 1 second silence after speaking triggers turn completion
+        const MIN_SPEECH_DURATION_MS = 350;   // Minimum speech duration to filter clicks
+
+        const isModelCurrentlySpeaking = this.activeSources.length > 0;
+        const timeSinceModelStarted = now - this.modelPlaybackStartTime;
+
+        // User barge-in: If user speaks loud and sustained while assistant is speaking
+        if (isModelCurrentlySpeaking && timeSinceModelStarted > 600 && rms > BARGE_IN_THRESHOLD) {
+          console.log(`[GeminiLiveSession] User barge-in detected (RMS: ${rms.toFixed(3)}). Halting assistant audio.`);
           this.stopAllAudioPlayback();
+          this.isTurnCompletePending = false;
+          this.hasReceivedFirstModelTurn = false;
           this.onInterrupted?.();
+          this.onStatusChange?.('listening');
         }
 
-        // Convert Float32 to 16-bit PCM little-endian for Gemini Live API
-        const pcm16 = new Int16Array(channelData.length);
-        for (let i = 0; i < channelData.length; i++) {
-          const s = Math.max(-1, Math.min(1, channelData[i]));
-          pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        // Client Voice Activity Detection (VAD)
+        if (rms > SPEECH_START_THRESHOLD) {
+          if (!this.isUserSpeaking) {
+            this.isUserSpeaking = true;
+            this.speechStartTime = now;
+            console.log(`[GeminiLiveSession VAD] User speech started (RMS: ${rms.toFixed(3)})`);
+            this.onStatusChange?.('listening');
+          }
+          this.lastSpeechTime = now;
+
+          if (this.silenceTimer) {
+            clearTimeout(this.silenceTimer);
+            this.silenceTimer = null;
+          }
+        } else if (this.isUserSpeaking) {
+          // User was speaking and is now silent: start silence countdown
+          if (!this.silenceTimer) {
+            this.silenceTimer = setTimeout(() => {
+              const speechDuration = this.lastSpeechTime - this.speechStartTime;
+              if (speechDuration >= MIN_SPEECH_DURATION_MS) {
+                console.log(
+                  `[GeminiLiveSession VAD] User speech ended (${speechDuration}ms speech, ${SILENCE_TIMEOUT_MS}ms silence). Completing turn...`
+                );
+                this.sendTurnComplete();
+              } else {
+                console.log(`[GeminiLiveSession VAD] Speech duration too short (${speechDuration}ms), ignoring.`);
+              }
+              this.isUserSpeaking = false;
+              this.silenceTimer = null;
+            }, SILENCE_TIMEOUT_MS);
+          }
         }
 
+        // Resample input to guaranteed 16kHz PCM
+        const pcm16 = this.resampleTo16k(channelData, actualSampleRate);
         const base64 = this.arrayBufferToBase64(pcm16.buffer);
 
         if (this.isDirectConnection) {
@@ -631,51 +784,75 @@ ${this.page ? `Current App Screen: ${this.page}` : ''}`;
   }
 
   private playPcm24k(base64Data: string) {
-    if (!this.outputAudioCtx) {
-      this.outputAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      this.nextStartTime = this.outputAudioCtx.currentTime;
+    if (!base64Data) return;
+
+    try {
+      if (!this.outputAudioCtx) {
+        this.outputAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+
+      if (this.outputAudioCtx.state === 'suspended') {
+        this.outputAudioCtx.resume().catch(() => {});
+      }
+
+      const binary = atob(base64Data);
+      const len = binary.length;
+      const sampleCount = Math.floor(len / 2);
+      if (sampleCount === 0) return;
+
+      const float32 = new Float32Array(sampleCount);
+      let sum = 0;
+      for (let i = 0; i < sampleCount; i++) {
+        const byte1 = binary.charCodeAt(i * 2);
+        const byte2 = binary.charCodeAt(i * 2 + 1);
+        let val = byte1 | (byte2 << 8);
+        if (val >= 0x8000) val -= 0x10000;
+        const norm = val / 32768.0;
+        float32[i] = norm;
+        sum += Math.abs(norm);
+      }
+
+      if (!this.hasReceivedFirstModelTurn) {
+        this.hasReceivedFirstModelTurn = true;
+        this.modelPlaybackStartTime = Date.now();
+      }
+
+      // Audio activity from model output
+      const modelLevel = Math.min(1, (sum / sampleCount) * 4.5);
+      this.onAudioActivity?.(modelLevel, 'model');
+      this.onStatusChange?.('speaking');
+
+      const audioBuffer = this.outputAudioCtx.createBuffer(1, float32.length, 24000);
+      audioBuffer.getChannelData(0).set(float32);
+
+      const source = this.outputAudioCtx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(this.outputAudioCtx.destination);
+
+      const currentTime = this.outputAudioCtx.currentTime;
+      const startTime = Math.max(currentTime, this.nextStartTime);
+      source.start(startTime);
+      this.nextStartTime = startTime + audioBuffer.duration;
+
+      this.activeSources.push(source);
+      source.onended = () => {
+        const idx = this.activeSources.indexOf(source);
+        if (idx !== -1) this.activeSources.splice(idx, 1);
+
+        // When all scheduled audio buffers finish playing
+        if (this.activeSources.length === 0) {
+          this.hasReceivedFirstModelTurn = false;
+          if (this.isTurnCompletePending) {
+            this.isTurnCompletePending = false;
+            console.log('[GeminiLiveSession] Assistant speech finished. State -> listening');
+            this.onStatusChange?.('listening');
+            this.onTurnComplete?.();
+          }
+        }
+      };
+    } catch (err) {
+      console.error('[GeminiLiveSession] Error in playPcm24k:', err);
     }
-
-    if (this.outputAudioCtx.state === 'suspended') {
-      this.outputAudioCtx.resume().catch(() => {});
-    }
-
-    const binary = atob(base64Data);
-    const len = binary.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    const int16 = new Int16Array(bytes.buffer);
-    const float32 = new Float32Array(int16.length);
-
-    let sum = 0;
-    for (let i = 0; i < int16.length; i++) {
-      float32[i] = int16[i] / 32768.0;
-      sum += Math.abs(float32[i]);
-    }
-
-    // Audio activity from model output
-    const modelLevel = Math.min(1, (sum / float32.length) * 4.5);
-    this.onAudioActivity?.(modelLevel, 'model');
-
-    const audioBuffer = this.outputAudioCtx.createBuffer(1, float32.length, 24000);
-    audioBuffer.getChannelData(0).set(float32);
-
-    const source = this.outputAudioCtx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(this.outputAudioCtx.destination);
-
-    const currentTime = this.outputAudioCtx.currentTime;
-    const startTime = Math.max(currentTime, this.nextStartTime);
-    source.start(startTime);
-    this.nextStartTime = startTime + audioBuffer.duration;
-
-    this.activeSources.push(source);
-    source.onended = () => {
-      const idx = this.activeSources.indexOf(source);
-      if (idx !== -1) this.activeSources.splice(idx, 1);
-    };
   }
 
   public stopAllAudioPlayback() {
@@ -695,6 +872,8 @@ ${this.page ? `Current App Screen: ${this.page}` : ''}`;
 
   public interrupt() {
     this.stopAllAudioPlayback();
+    this.isTurnCompletePending = false;
+    this.hasReceivedFirstModelTurn = false;
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
         if (!this.isDirectConnection) {
@@ -705,10 +884,12 @@ ${this.page ? `Current App Screen: ${this.page}` : ''}`;
       }
     }
     this.onInterrupted?.();
+    this.onStatusChange?.('listening');
   }
 
   public sendText(text: string) {
     if (!text.trim()) return;
+    this.onStatusChange?.('thinking');
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       if (this.isDirectConnection) {
         this.ws.send(JSON.stringify({
@@ -728,9 +909,9 @@ ${this.page ? `Current App Screen: ${this.page}` : ''}`;
     }
   }
 
-  private arrayBufferToBase64(buffer: ArrayBuffer): string {
+  private arrayBufferToBase64(buffer: ArrayBuffer | ArrayBufferLike): string {
     let binary = '';
-    const bytes = new Uint8Array(buffer);
+    const bytes = new Uint8Array(buffer as ArrayBuffer);
     const len = bytes.byteLength;
     for (let i = 0; i < len; i++) {
       binary += String.fromCharCode(bytes[i]);
@@ -740,6 +921,15 @@ ${this.page ? `Current App Screen: ${this.page}` : ''}`;
 
   public stop() {
     this.isConnected = false;
+    this.isUserSpeaking = false;
+    this.isTurnCompletePending = false;
+    this.hasReceivedFirstModelTurn = false;
+
+    if (this.silenceTimer) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
+    }
+
     this.stopAllAudioPlayback();
 
     if (this.processor) {

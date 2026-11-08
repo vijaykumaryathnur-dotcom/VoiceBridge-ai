@@ -876,10 +876,10 @@ ${pageParam ? `Current App Screen: ${pageParam}` : ''}`;
             }
           }
 
-          // Forward turn complete event
-          if (content?.turnComplete) {
+          // Forward turn complete / generation complete event
+          if (content?.turnComplete || content?.generationComplete) {
             if (clientWs.readyState === WebSocket.OPEN) {
-              clientWs.send(JSON.stringify({ turnComplete: true }));
+              clientWs.send(JSON.stringify({ turnComplete: true, generationComplete: true }));
             }
           }
         },
@@ -912,6 +912,9 @@ ${pageParam ? `Current App Screen: ${pageParam}` : ''}`;
           session.sendRealtimeInput({
             audio: { data: parsed.audio, mimeType: 'audio/pcm;rate=16000' }
           });
+        } else if (parsed.turnComplete) {
+          // Send explicit turnComplete signal
+          session.sendClientContent({ turnComplete: true });
         } else if (parsed.text) {
           // Send text prompt into the live conversation
           session.sendRealtimeInput({

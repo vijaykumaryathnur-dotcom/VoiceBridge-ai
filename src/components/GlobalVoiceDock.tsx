@@ -142,8 +142,12 @@ export const GlobalVoiceDock: React.FC<GlobalVoiceDockProps> = ({
       liveSessionRef.current = session;
 
       session.onStatusChange = (status, err) => {
-        if (status === 'connected') {
+        if (status === 'connected' || status === 'listening') {
           setVoiceState('listening');
+        } else if (status === 'thinking') {
+          setVoiceState('thinking');
+        } else if (status === 'speaking') {
+          setVoiceState('speaking');
         } else if (status === 'disconnected' || status === 'error') {
           setVoiceState('idle');
           if (err) {

@@ -285,9 +285,13 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
     liveSessionRef.current = live;
 
     live.onStatusChange = (st, err) => {
-      setLiveSessionStatus(st);
-      if (st === 'connected') {
+      setLiveSessionStatus(st as any);
+      if (st === 'connected' || st === 'listening') {
         setOrbState('listening');
+      } else if (st === 'thinking') {
+        setOrbState('thinking');
+      } else if (st === 'speaking') {
+        setOrbState('speaking');
       } else if (st === 'error') {
         setOrbState('idle');
         setLiveError(err || 'Gemini Live API connection interrupted.');
