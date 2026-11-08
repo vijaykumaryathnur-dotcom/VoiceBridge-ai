@@ -148,6 +148,7 @@ export const GlobalVoiceDock: React.FC<GlobalVoiceDockProps> = ({
           setVoiceState('idle');
           if (err) {
             console.warn('Live API dock status error:', err);
+            setAssistantReply(err);
           }
         }
       };

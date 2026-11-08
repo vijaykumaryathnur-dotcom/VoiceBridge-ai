@@ -19,13 +19,17 @@ const isProduction = process.env.NODE_ENV === 'production';
 // Increase payload limit for audio transcription base64 data
 app.use(express.json({ limit: '25mb' }));
 
-// Initialize GoogleGenAI client with required header
-const geminiApiKey = process.env.GEMINI_API_KEY;
-let aiClient: GoogleGenAI | null = null;
-if (geminiApiKey) {
+// Initialize GoogleGenAI client with dynamic key lookup
+export function getGeminiApiKey(): string {
+  return process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
+}
+
+export function getAiClient(): GoogleGenAI | null {
+  const key = getGeminiApiKey();
+  if (!key) return null;
   try {
-    aiClient = new GoogleGenAI({
-      apiKey: geminiApiKey,
+    return new GoogleGenAI({
+      apiKey: key,
       httpOptions: {
         headers: {
           'User-Agent': 'aistudio-build',
@@ -34,8 +38,13 @@ if (geminiApiKey) {
     });
   } catch (err) {
     console.warn('Failed to initialize GoogleGenAI client:', err);
+    return null;
   }
 }
+
+// Global reference for backward compatibility
+const geminiApiKey = getGeminiApiKey();
+let aiClient: GoogleGenAI | null = getAiClient();
 
 // In-memory store for workflows and sessions
 const workflowsStore: Record<string, any> = {
@@ -123,11 +132,59 @@ const workflowsStore: Record<string, any> = {
 // REST API ROUTES
 // ==========================================
 
+// 0. Live Session Authorization & Configuration (for direct client WebSocket & Vercel)
+app.all('/api/live-session', (req, res) => {
+  const key = getGeminiApiKey();
+  const isVercel = Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
+  const isConfigured = Boolean(key && key.length > 5);
+
+  console.log(`[API /api/live-session] Request received from ${req.ip || 'client'}. Configured: ${isConfigured}, Host: ${req.headers.host}, Env: ${isVercel ? 'vercel' : 'node_server'}`);
+
+  if (!isConfigured) {
+    return res.status(200).json({
+      success: false,
+      configured: false,
+      model: 'gemini-3.8-live',
+      error: 'GEMINI_API_KEY is not configured on the server. Live API requires Gemini credentials.',
+      environment: isVercel ? 'vercel' : 'node_server',
+      hint: 'In your Vercel Project Dashboard: Go to Settings > Environment Variables, add GEMINI_API_KEY with your Google AI Studio API key, and redeploy.'
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    configured: true,
+    model: 'gemini-3.8-live',
+    voice: 'Aoede',
+    voices: ['Aoede', 'Charon', 'Fenrir', 'Kore', 'Puck', 'Zephyr'],
+    websocketEndpoint: 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent',
+    apiKey: key,
+    directLiveAvailable: true,
+    serverProxyAvailable: !isVercel,
+    environment: isVercel ? 'vercel' : 'node_server'
+  });
+});
+
+// Diagnostic HTTP route for /api/live
+app.all('/api/live', (req, res) => {
+  const isVercel = Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
+  console.log(`[API /api/live HTTP probe] Method: ${req.method}, Host: ${req.headers.host}`);
+  res.status(426).json({
+    error: 'Upgrade Required',
+    message: 'The /api/live endpoint is a WebSocket route requiring an HTTP Upgrade (wss://).',
+    deploymentNote: isVercel
+      ? 'Vercel Serverless / Edge does not support incoming persistent WebSockets. The VoiceBridge frontend automatically utilizes direct Gemini Live API streaming via /api/live-session.'
+      : 'On standalone Node/Cloud Run, connect with ws:// or wss:// with Upgrade: websocket.',
+    status: 'operational',
+    model: 'gemini-3.8-live'
+  });
+});
+
 // 1. Integrations Status
 app.get('/api/integrations', (_req, res) => {
   const bolnaConfigured = Boolean(process.env.BOLNA_API_KEY && process.env.BOLNA_AGENT_ID);
   const supabaseConfigured = Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY);
-  const geminiConfigured = Boolean(process.env.GEMINI_API_KEY);
+  const geminiConfigured = Boolean(getGeminiApiKey());
 
   res.json({
     status: 'operational',
@@ -672,11 +729,24 @@ wss.on('connection', async (clientWs: WebSocket, request: any) => {
 
   console.log(`[Gemini Live API] Client connected for ${targetLanguageName} with voice "${voiceName}" on page "${pageParam}"`);
 
-  if (!aiClient) {
+  // Send immediate connection acknowledgment to client
+  clientWs.send(JSON.stringify({
+    type: 'connection_ack',
+    status: 'connected',
+    message: 'WebSocket connection to VoiceBridge server established. Connecting to Gemini Live API...'
+  }));
+
+  const activeAiClient = getAiClient();
+  const currentKey = getGeminiApiKey();
+
+  if (!activeAiClient || !currentKey) {
+    console.error('[Gemini Live API Error] GEMINI_API_KEY is missing on server/Vercel.');
     clientWs.send(JSON.stringify({
-      error: 'GEMINI_API_KEY is not configured on the server. Live API requires Gemini credentials.'
+      error: 'GEMINI_API_KEY is not configured on the server. Live API requires Gemini credentials.',
+      errorCode: 'GEMINI_API_KEY_MISSING',
+      hint: 'In Vercel Dashboard, go to Settings > Environment Variables, add GEMINI_API_KEY, and redeploy.'
     }));
-    clientWs.close();
+    clientWs.close(1008, 'GEMINI_API_KEY_MISSING');
     return;
   }
 
@@ -694,7 +764,9 @@ VOICE-FIRST CONVERSATIONAL PRINCIPLES:
 ${topicParam ? `Active Scheme/Context: ${topicParam}` : ''}
 ${pageParam ? `Current App Screen: ${pageParam}` : ''}`;
 
-    const session = await aiClient.live.connect({
+    console.log(`[Gemini Live API] Initiating live.connect with model 'gemini-3.8-live' and voice '${voiceName}'...`);
+
+    const session = await activeAiClient.live.connect({
       model: 'gemini-3.8-live',
       config: {
         responseModalities: [Modality.AUDIO],
@@ -706,6 +778,17 @@ ${pageParam ? `Current App Screen: ${pageParam}` : ''}`;
         systemInstruction
       },
       callbacks: {
+        onopen: () => {
+          console.log('[Gemini Live API] Upstream session opened with Google Gemini API.');
+          if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.send(JSON.stringify({
+              status: 'live_ready',
+              model: 'gemini-3.8-live',
+              language,
+              voice: voiceName
+            }));
+          }
+        },
         onmessage: (message: LiveServerMessage) => {
           const content = message.serverContent;
 
@@ -746,8 +829,23 @@ ${pageParam ? `Current App Screen: ${pageParam}` : ''}`;
             }
           }
         },
-        onclose: () => {
-          console.log('[Gemini Live API] Session closed by server');
+        onclose: (closeEvent) => {
+          console.log('[Gemini Live API] Upstream session closed:', closeEvent);
+          if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.send(JSON.stringify({
+              type: 'upstream_closed',
+              message: 'Gemini Live API session closed.'
+            }));
+          }
+        },
+        onerror: (err: any) => {
+          console.error('[Gemini Live API Upstream Error]:', err?.message || err);
+          if (clientWs.readyState === WebSocket.OPEN) {
+            clientWs.send(JSON.stringify({
+              error: 'Upstream Live API error: ' + (err?.message || 'Connection lost'),
+              errorCode: 'UPSTREAM_GEMINI_ERROR'
+            }));
+          }
         }
       }
     });
@@ -765,13 +863,19 @@ ${pageParam ? `Current App Screen: ${pageParam}` : ''}`;
           session.sendRealtimeInput({
             text: parsed.text
           });
+        } else if (parsed.interrupt) {
+          // User barge-in triggered from client
+          session.sendRealtimeInput({
+            text: ''
+          });
         }
       } catch (err) {
         console.warn('Error parsing incoming WS message:', err);
       }
     });
 
-    clientWs.on('close', () => {
+    clientWs.on('close', (code, reason) => {
+      console.log(`[Gemini Live API] Client disconnected (code: ${code}, reason: ${reason?.toString() || 'none'})`);
       try {
         session.close();
       } catch (e) {
@@ -779,30 +883,53 @@ ${pageParam ? `Current App Screen: ${pageParam}` : ''}`;
       }
     });
 
+    clientWs.on('error', (err) => {
+      console.error('[Gemini Live API Client Socket Error]:', err?.message || err);
+    });
+
     // Notify client that Live session is active and ready
-    clientWs.send(JSON.stringify({
-      status: 'live_ready',
-      model: 'gemini-3.8-live',
-      language,
-      voice: voiceName
-    }));
-  } catch (liveErr: any) {
-    console.error('Failed to initiate Gemini 3.8 Live session:', liveErr);
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(JSON.stringify({
-        error: liveErr.message || 'Failed to start Gemini 3.8 Live session'
+        status: 'live_ready',
+        model: 'gemini-3.8-live',
+        language,
+        voice: voiceName
       }));
+    }
+  } catch (liveErr: any) {
+    console.error('[Gemini Live API Connection Failure]:', liveErr);
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.send(JSON.stringify({
+        error: liveErr?.message || 'Failed to start Gemini 3.8 Live session',
+        errorCode: 'GEMINI_INIT_FAILED',
+        details: liveErr?.toString()
+      }));
+      clientWs.close(1011, 'GEMINI_INIT_FAILED');
     }
   }
 });
 
-// Handle HTTP upgrade for WebSocket on /api/live
+// Handle HTTP upgrade for WebSocket on /api/live with detailed logging
 server.on('upgrade', (request, socket, head) => {
-  const pathname = request.url?.split('?')[0];
+  const urlObj = new URL(request.url || '', 'http://localhost');
+  const pathname = urlObj.pathname;
+  const clientIp = request.headers['x-forwarded-for'] || request.socket?.remoteAddress || 'unknown';
+
+  console.log(`[Live WS Upgrade Attempt] Time: ${new Date().toISOString()} | Path: ${pathname} | IP: ${clientIp} | Origin: ${request.headers.origin}`);
+
   if (pathname === '/api/live') {
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit('connection', ws, request);
-    });
+    try {
+      wss.handleUpgrade(request, socket, head, (ws) => {
+        console.log(`[Live WS Upgrade Success] Upgraded WebSocket for client: ${clientIp}`);
+        wss.emit('connection', ws, request);
+      });
+    } catch (upgradeErr: any) {
+      console.error('[Live WS Upgrade Failed]:', upgradeErr?.message || upgradeErr);
+      socket.destroy();
+    }
+  } else {
+    console.warn(`[Live WS Upgrade Rejected] Path ${pathname} does not match /api/live`);
+    socket.destroy();
   }
 });
 
@@ -827,4 +954,10 @@ async function startServer() {
   });
 }
 
-startServer();
+// In Vercel serverless environment, do not start persistent server listener
+if (!process.env.VERCEL && !process.env.VERCEL_ENV) {
+  startServer();
+}
+
+export default app;
+export { app, server };

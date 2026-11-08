@@ -257,6 +257,7 @@ export async function transcribeAudio(
 }
 
 // Gemini Live API Audio Client Helper (gemini-3.8-live)
+// Supports both Direct Browser-to-Gemini WebSocket (for Vercel & serverless) and Server Proxy Bridge (for standalone Node / Cloud Run)
 export class GeminiLiveSession {
   private ws: WebSocket | null = null;
   private inputAudioCtx: AudioContext | null = null;
@@ -265,6 +266,7 @@ export class GeminiLiveSession {
   private processor: ScriptProcessorNode | null = null;
   private nextStartTime: number = 0;
   private isConnected: boolean = false;
+  private isDirectConnection: boolean = false;
   private activeSources: AudioBufferSourceNode[] = [];
 
   public language: SupportedLanguage = 'en';
@@ -299,6 +301,171 @@ export class GeminiLiveSession {
     this.stop();
     this.onStatusChange?.('connecting');
 
+    // 1. Fetch live session authorization & configuration from backend
+    let sessionConfig: any = null;
+    try {
+      const res = await fetch('/api/live-session', { cache: 'no-store' });
+      if (res.ok) {
+        sessionConfig = await res.json();
+      }
+    } catch (err) {
+      console.warn('[GeminiLiveSession] /api/live-session check:', err);
+    }
+
+    // 2. If backend explicitly reports key missing
+    if (sessionConfig && sessionConfig.configured === false) {
+      const errorMsg = sessionConfig.error || 'GEMINI_API_KEY is not configured on the server. Please add GEMINI_API_KEY to your Vercel Project Settings > Environment Variables and redeploy.';
+      console.error('[GeminiLiveSession Config Error]:', errorMsg);
+      this.onStatusChange?.('error', errorMsg);
+      return;
+    }
+
+    // 3. Check for Direct Live API credentials (required on Vercel)
+    const directKey = sessionConfig?.apiKey || (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_GEMINI_API_KEY);
+    const isVercelHost = window.location.hostname.includes('vercel.app');
+
+    if (directKey && (isVercelHost || sessionConfig?.directLiveAvailable)) {
+      console.log('[GeminiLiveSession] Initializing Direct Live API connection (model: gemini-3.8-live)...');
+      this.isDirectConnection = true;
+      const endpoint = sessionConfig?.websocketEndpoint || 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
+      this.connectDirectWebSocket(directKey, endpoint);
+      return;
+    }
+
+    // 4. Fallback to server proxy bridge (e.g. for localhost / Cloud Run persistent server)
+    console.log('[GeminiLiveSession] Connecting via server WebSocket proxy on /api/live...');
+    this.isDirectConnection = false;
+    this.connectServerProxy();
+  }
+
+  private connectDirectWebSocket(apiKey: string, endpointUrl: string) {
+    const wsUrl = `${endpointUrl}?key=${apiKey}`;
+    try {
+      this.ws = new WebSocket(wsUrl);
+      this.ws.binaryType = 'arraybuffer';
+    } catch (err: any) {
+      console.error('[GeminiLiveSession] Direct WebSocket constructor error:', err);
+      this.onStatusChange?.('error', `Failed to open WebSocket to Gemini Live API: ${err?.message || err}`);
+      return;
+    }
+
+    this.ws.onopen = () => {
+      console.log('[GeminiLiveSession Direct] WebSocket opened. Sending setup frame...');
+      const targetLanguageName = this.language === 'te' ? 'Telugu (తెలుగు)' : this.language === 'hi' ? 'Hindi (हिन्दी)' : 'Indian English';
+      const systemInstruction = `You are VoiceBridge AI, a warm, patient, and conversational voice companion assisting citizens with public services, education scholarships, healthcare schemes, and general everyday inquiries.
+Target Language: ${targetLanguageName}
+
+VOICE-FIRST CONVERSATIONAL PRINCIPLES:
+1. Speak warmly and naturally in ${targetLanguageName}, as if sitting right beside the citizen.
+2. Respond conversationally in 1 to 3 spoken sentences. Avoid monologue-length responses.
+3. NEVER recite markdown symbols, asterisk bolding, bullet points, numbered lists, or raw portal URLs aloud.
+4. If explaining complex paperwork or criteria, use simple everyday examples.
+5. Answer directly without repeating the citizen's entire question.
+6. The user can interrupt you at any moment; adapt fluidly and naturally to their speech.
+${this.topic ? `Active Scheme/Context: ${this.topic}` : ''}
+${this.page ? `Current App Screen: ${this.page}` : ''}`;
+
+      const setupMessage = {
+        setup: {
+          model: 'models/gemini-3.8-live',
+          generationConfig: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: {
+                  voiceName: this.voiceName || 'Aoede'
+                }
+              }
+            }
+          },
+          systemInstruction: {
+            parts: [{ text: systemInstruction }]
+          },
+          inputAudioTranscription: {},
+          outputAudioTranscription: {}
+        }
+      };
+
+      this.ws?.send(JSON.stringify(setupMessage));
+      this.isConnected = true;
+      this.onStatusChange?.('connected');
+      this.initMicStream();
+    };
+
+    this.ws.onmessage = async (event) => {
+      try {
+        let textData = '';
+        if (typeof event.data === 'string') {
+          textData = event.data;
+        } else if (event.data instanceof ArrayBuffer) {
+          textData = new TextDecoder().decode(event.data);
+        } else if (typeof Blob !== 'undefined' && event.data instanceof Blob) {
+          textData = await event.data.text();
+        }
+
+        if (!textData) return;
+        const msg = JSON.parse(textData);
+
+        if (msg.setupComplete) {
+          console.log('[GeminiLiveSession Direct] Setup completed by Gemini 3.8 Live API');
+        }
+
+        // Handle model audio output (24kHz PCM)
+        const parts = msg.serverContent?.modelTurn?.parts || [];
+        for (const part of parts) {
+          if (part.inlineData?.data) {
+            this.playPcm24k(part.inlineData.data);
+          }
+        }
+
+        // User speech transcription
+        if (msg.serverContent?.inputTranscription?.text) {
+          this.onInputTranscript?.(msg.serverContent.inputTranscription.text);
+        }
+
+        // Model spoken speech transcription
+        if (msg.serverContent?.outputTranscription?.text) {
+          this.onOutputTranscript?.(msg.serverContent.outputTranscription.text);
+        }
+
+        // Interruption
+        if (msg.serverContent?.interrupted) {
+          this.stopAllAudioPlayback();
+          this.onInterrupted?.();
+        }
+
+        // Turn complete
+        if (msg.serverContent?.turnComplete) {
+          this.onTurnComplete?.();
+        }
+      } catch (err) {
+        console.warn('[GeminiLiveSession Direct] Message parsing note:', err);
+      }
+    };
+
+    this.ws.onerror = (e) => {
+      console.error('[GeminiLiveSession Direct] Error:', e);
+      this.onStatusChange?.('error', 'Gemini Live API connection error. Please verify your GEMINI_API_KEY.');
+    };
+
+    this.ws.onclose = (e) => {
+      console.log('[GeminiLiveSession Direct] Closed with code:', e.code, 'reason:', e.reason);
+      this.isConnected = false;
+      this.stopAllAudioPlayback();
+
+      if (e.code === 1007) {
+        this.onStatusChange?.('error', 'Gemini Live API key rejected (code 1007). Please verify that GEMINI_API_KEY is a valid Google AI Studio key.');
+      } else if (e.code === 1008 || e.code === 1011) {
+        this.onStatusChange?.('error', `Live session rejected (${e.reason || 'Authentication or quota error'}).`);
+      } else if (e.wasClean) {
+        this.onStatusChange?.('disconnected');
+      } else {
+        this.onStatusChange?.('error', e.reason || 'Gemini Live session disconnected.');
+      }
+    };
+  }
+
+  private connectServerProxy() {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const params = new URLSearchParams({
       lang: this.language,
@@ -308,7 +475,13 @@ export class GeminiLiveSession {
     });
     const wsUrl = `${protocol}//${window.location.host}/api/live?${params.toString()}`;
 
-    this.ws = new WebSocket(wsUrl);
+    try {
+      this.ws = new WebSocket(wsUrl);
+    } catch (err: any) {
+      console.error('[GeminiLiveSession Proxy] WebSocket constructor error:', err);
+      this.onStatusChange?.('error', 'Failed to connect to /api/live proxy.');
+      return;
+    }
 
     this.ws.onopen = () => {
       this.isConnected = true;
@@ -322,7 +495,6 @@ export class GeminiLiveSession {
         if (msg.error) {
           this.onStatusChange?.('error', msg.error);
         } else if (msg.audio) {
-          // Play 24kHz PCM chunk from gemini-3.8-live
           this.playPcm24k(msg.audio);
         } else if (msg.inputTranscript) {
           this.onInputTranscript?.(msg.inputTranscript);
@@ -340,14 +512,23 @@ export class GeminiLiveSession {
     };
 
     this.ws.onerror = (e) => {
-      console.warn('Gemini Live API WebSocket connection error:', e);
-      this.onStatusChange?.('error', 'Live API connection error. Please verify server status.');
+      console.warn('Gemini Live API WebSocket proxy error:', e);
+      if (window.location.hostname.includes('vercel.app')) {
+        this.onStatusChange?.('error', 'Vercel Serverless hosting does not support persistent WebSockets on /api/live. Please configure GEMINI_API_KEY in Vercel Project Settings > Environment Variables so direct Gemini Live API connection can be authorized.');
+      } else {
+        this.onStatusChange?.('error', 'Live API connection error. Please verify server status.');
+      }
     };
 
-    this.ws.onclose = () => {
+    this.ws.onclose = (e) => {
       this.isConnected = false;
       this.stopAllAudioPlayback();
-      this.onStatusChange?.('disconnected');
+
+      if (e.code === 1006 && window.location.hostname.includes('vercel.app')) {
+        this.onStatusChange?.('error', 'Vercel Edge closed the WebSocket connection (code 1006). Vercel Serverless requires GEMINI_API_KEY to be set in Vercel Environment Variables so the browser connects directly to Gemini Live API.');
+      } else {
+        this.onStatusChange?.('disconnected');
+      }
     };
   }
 
@@ -399,7 +580,21 @@ export class GeminiLiveSession {
         }
 
         const base64 = this.arrayBufferToBase64(pcm16.buffer);
-        this.ws.send(JSON.stringify({ audio: base64 }));
+
+        if (this.isDirectConnection) {
+          this.ws.send(JSON.stringify({
+            realtimeInput: {
+              mediaChunks: [
+                {
+                  mimeType: 'audio/pcm;rate=16000',
+                  data: base64
+                }
+              ]
+            }
+          }));
+        } else {
+          this.ws.send(JSON.stringify({ audio: base64 }));
+        }
       };
     } catch (err: any) {
       console.error('Failed to init microphone for Gemini Live API:', err);
@@ -474,7 +669,9 @@ export class GeminiLiveSession {
     this.stopAllAudioPlayback();
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       try {
-        this.ws.send(JSON.stringify({ interrupt: true }));
+        if (!this.isDirectConnection) {
+          this.ws.send(JSON.stringify({ interrupt: true }));
+        }
       } catch (e) {
         // ignore
       }
@@ -485,7 +682,21 @@ export class GeminiLiveSession {
   public sendText(text: string) {
     if (!text.trim()) return;
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ text }));
+      if (this.isDirectConnection) {
+        this.ws.send(JSON.stringify({
+          clientContent: {
+            turns: [
+              {
+                role: 'user',
+                parts: [{ text }]
+              }
+            ],
+            turnComplete: true
+          }
+        }));
+      } else {
+        this.ws.send(JSON.stringify({ text }));
+      }
     }
   }
 
