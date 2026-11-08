@@ -132,8 +132,9 @@ const workflowsStore: Record<string, any> = {
 // REST API ROUTES
 // ==========================================
 
-// 0. Live Session Authorization & Configuration (for direct client WebSocket & Vercel)
-app.all('/api/live-session', (req, res) => {
+// 0. Live Session Authorization & Configuration (secure ephemeral token generation for direct browser Live API & Vercel)
+app.all('/api/live-session', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   const key = getGeminiApiKey();
   const isVercel = Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
   const isConfigured = Boolean(key && key.length > 5);
@@ -151,18 +152,71 @@ app.all('/api/live-session', (req, res) => {
     });
   }
 
-  return res.status(200).json({
-    success: true,
-    configured: true,
-    model: 'gemini-3.8-live',
-    voice: 'Aoede',
-    voices: ['Aoede', 'Charon', 'Fenrir', 'Kore', 'Puck', 'Zephyr'],
-    websocketEndpoint: 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent',
-    apiKey: key,
-    directLiveAvailable: true,
-    serverProxyAvailable: !isVercel,
-    environment: isVercel ? 'vercel' : 'node_server'
-  });
+  try {
+    const tokenRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1alpha/auth_tokens?key=${encodeURIComponent(key)}`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'VoiceBridge-AI/1.0'
+        },
+        body: JSON.stringify({
+          bidiGenerateContentSetup: {
+            model: 'models/gemini-3.8-live'
+          }
+        })
+      }
+    );
+
+    if (!tokenRes.ok) {
+      const errText = await tokenRes.text();
+      console.error('[server /api/live-session] Ephemeral token creation failed:', tokenRes.status, errText);
+      return res.status(200).json({
+        success: false,
+        configured: true,
+        error: `Failed to create ephemeral session token from Gemini API (${tokenRes.status}). Please check your GEMINI_API_KEY.`,
+        details: errText,
+        environment: isVercel ? 'vercel' : 'node_server'
+      });
+    }
+
+    const tokenData = (await tokenRes.json()) as { name?: string };
+    const ephemeralToken = tokenData?.name;
+
+    if (!ephemeralToken) {
+      return res.status(200).json({
+        success: false,
+        configured: true,
+        error: 'Gemini Live token generation succeeded but returned no token resource name.',
+        environment: isVercel ? 'vercel' : 'node_server'
+      });
+    }
+
+    // Success: Return ephemeral token and constrained WebSocket endpoint.
+    // SECURITY GUARANTEE: The permanent GEMINI_API_KEY is NEVER sent to the client.
+    return res.status(200).json({
+      success: true,
+      configured: true,
+      token: ephemeralToken,
+      model: 'gemini-3.8-live',
+      voice: 'Aoede',
+      voices: ['Aoede', 'Charon', 'Fenrir', 'Kore', 'Puck', 'Zephyr'],
+      websocketEndpoint:
+        'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained',
+      directLiveAvailable: true,
+      serverProxyAvailable: !isVercel,
+      environment: isVercel ? 'vercel' : 'node_server'
+    });
+  } catch (err: any) {
+    console.error('[server /api/live-session] Server error:', err);
+    return res.status(500).json({
+      success: false,
+      configured: true,
+      error: `Server error generating session token: ${err?.message || err}`,
+      environment: isVercel ? 'vercel' : 'node_server'
+    });
+  }
 });
 
 // Diagnostic HTTP route for /api/live

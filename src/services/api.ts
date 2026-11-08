@@ -312,7 +312,7 @@ export class GeminiLiveSession {
       console.warn('[GeminiLiveSession] /api/live-session check:', err);
     }
 
-    // 2. If backend explicitly reports key missing
+    // 2. If backend explicitly reports key missing or configuration error
     if (sessionConfig && sessionConfig.configured === false) {
       const errorMsg = sessionConfig.error || 'GEMINI_API_KEY is not configured on the server. Please add GEMINI_API_KEY to your Vercel Project Settings > Environment Variables and redeploy.';
       console.error('[GeminiLiveSession Config Error]:', errorMsg);
@@ -320,26 +320,41 @@ export class GeminiLiveSession {
       return;
     }
 
-    // 3. Check for Direct Live API credentials (required on Vercel)
-    const directKey = sessionConfig?.apiKey || (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_GEMINI_API_KEY);
-    const isVercelHost = window.location.hostname.includes('vercel.app');
-
-    if (directKey && (isVercelHost || sessionConfig?.directLiveAvailable)) {
-      console.log('[GeminiLiveSession] Initializing Direct Live API connection (model: gemini-3.8-live)...');
-      this.isDirectConnection = true;
-      const endpoint = sessionConfig?.websocketEndpoint || 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
-      this.connectDirectWebSocket(directKey, endpoint);
+    if (sessionConfig && sessionConfig.success === false && sessionConfig.error) {
+      console.error('[GeminiLiveSession Token Error]:', sessionConfig.error);
+      this.onStatusChange?.('error', sessionConfig.error);
       return;
     }
 
-    // 4. Fallback to server proxy bridge (e.g. for localhost / Cloud Run persistent server)
-    console.log('[GeminiLiveSession] Connecting via server WebSocket proxy on /api/live...');
+    // 3. Ephemeral token and endpoint provided by secure backend
+    const ephemeralToken: string | undefined = sessionConfig?.token;
+    const endpoint: string = sessionConfig?.websocketEndpoint ||
+      'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained';
+    const isVercelHost = window.location.hostname.includes('vercel.app');
+
+    // On Vercel, incoming WebSockets to /api/live are not supported by the serverless router,
+    // so the browser connects directly to Gemini Live API using the secure ephemeral token.
+    if (isVercelHost) {
+      if (ephemeralToken) {
+        console.log('[GeminiLiveSession] Running on Vercel host: connecting directly with secure ephemeral token...');
+        this.isDirectConnection = true;
+        this.connectDirectWebSocket(ephemeralToken, endpoint);
+        return;
+      } else {
+        this.onStatusChange?.('error', 'Ephemeral session token not received. Please verify GEMINI_API_KEY in Vercel settings.');
+        return;
+      }
+    }
+
+    // On standalone Node, Cloud Run, and local development, the same-origin /api/live
+    // server proxy is running and connects upstream via Node.js @google/genai client.
+    console.log('[GeminiLiveSession] Connecting via same-origin server WebSocket proxy on /api/live...');
     this.isDirectConnection = false;
-    this.connectServerProxy();
+    this.connectServerProxy(ephemeralToken, endpoint);
   }
 
-  private connectDirectWebSocket(apiKey: string, endpointUrl: string) {
-    const wsUrl = `${endpointUrl}?key=${apiKey}`;
+  private connectDirectWebSocket(ephemeralToken: string, endpointUrl: string) {
+    const wsUrl = `${endpointUrl}?access_token=${ephemeralToken}`;
     try {
       this.ws = new WebSocket(wsUrl);
       this.ws.binaryType = 'arraybuffer';
@@ -350,7 +365,7 @@ export class GeminiLiveSession {
     }
 
     this.ws.onopen = () => {
-      console.log('[GeminiLiveSession Direct] WebSocket opened. Sending setup frame...');
+      console.log('[GeminiLiveSession Direct] WebSocket opened with ephemeral token. Sending setup frame...');
       const targetLanguageName = this.language === 'te' ? 'Telugu (తెలుగు)' : this.language === 'hi' ? 'Hindi (हिन्दी)' : 'Indian English';
       const systemInstruction = `You are VoiceBridge AI, a warm, patient, and conversational voice companion assisting citizens with public services, education scholarships, healthcare schemes, and general everyday inquiries.
 Target Language: ${targetLanguageName}
@@ -445,7 +460,14 @@ ${this.page ? `Current App Screen: ${this.page}` : ''}`;
 
     this.ws.onerror = (e) => {
       console.error('[GeminiLiveSession Direct] Error:', e);
-      this.onStatusChange?.('error', 'Gemini Live API connection error. Please verify your GEMINI_API_KEY.');
+      // If direct connection failed on non-Vercel host, gracefully fallback to same-origin server proxy
+      if (!window.location.hostname.includes('vercel.app') && !this.isConnected) {
+        console.log('[GeminiLiveSession Direct] Direct connection unavailable. Falling back to same-origin /api/live proxy...');
+        this.isDirectConnection = false;
+        this.connectServerProxy();
+        return;
+      }
+      this.onStatusChange?.('error', 'Gemini Live API connection error. Please verify your GEMINI_API_KEY in Vercel settings.');
     };
 
     this.ws.onclose = (e) => {
@@ -454,7 +476,7 @@ ${this.page ? `Current App Screen: ${this.page}` : ''}`;
       this.stopAllAudioPlayback();
 
       if (e.code === 1007) {
-        this.onStatusChange?.('error', 'Gemini Live API key rejected (code 1007). Please verify that GEMINI_API_KEY is a valid Google AI Studio key.');
+        this.onStatusChange?.('error', 'Gemini Live session token rejected (code 1007). Please verify GEMINI_API_KEY in Vercel settings.');
       } else if (e.code === 1008 || e.code === 1011) {
         this.onStatusChange?.('error', `Live session rejected (${e.reason || 'Authentication or quota error'}).`);
       } else if (e.wasClean) {
@@ -465,7 +487,7 @@ ${this.page ? `Current App Screen: ${this.page}` : ''}`;
     };
   }
 
-  private connectServerProxy() {
+  private connectServerProxy(ephemeralToken?: string, endpointUrl?: string) {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const params = new URLSearchParams({
       lang: this.language,
@@ -513,8 +535,14 @@ ${this.page ? `Current App Screen: ${this.page}` : ''}`;
 
     this.ws.onerror = (e) => {
       console.warn('Gemini Live API WebSocket proxy error:', e);
+      if (ephemeralToken && endpointUrl && !this.isConnected) {
+        console.log('[GeminiLiveSession Proxy] Server proxy error. Retrying via direct Live API connection with ephemeral token...');
+        this.isDirectConnection = true;
+        this.connectDirectWebSocket(ephemeralToken, endpointUrl);
+        return;
+      }
       if (window.location.hostname.includes('vercel.app')) {
-        this.onStatusChange?.('error', 'Vercel Serverless hosting does not support persistent WebSockets on /api/live. Please configure GEMINI_API_KEY in Vercel Project Settings > Environment Variables so direct Gemini Live API connection can be authorized.');
+        this.onStatusChange?.('error', 'Vercel Serverless hosting requires GEMINI_API_KEY configured in Vercel Project Settings > Environment Variables.');
       } else {
         this.onStatusChange?.('error', 'Live API connection error. Please verify server status.');
       }
