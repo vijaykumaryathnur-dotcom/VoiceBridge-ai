@@ -67,30 +67,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({
   };
 
   const handleToggleDemoMic = () => {
-    if (orbState === 'listening') {
-      voiceEngine.stopListening();
-      setOrbState('idle');
-      return;
-    }
-
     voiceEngine.cancelSpeech();
-    voiceEngine.setAudioLevelCallback((lvl) => setAudioLevel(lvl));
-
-    voiceEngine.startListening(
-      demoLanguage,
-      (transcript, isFinal) => {
-        setDemoTranscript(transcript);
-        if (isFinal) {
-          voiceEngine.stopListening();
-          handleTestPrompt(transcript);
-        }
-      },
-      (err) => {
-        console.warn('Demo speech recognition error:', err);
-        setOrbState('idle');
-      },
-      () => setOrbState('listening')
-    );
+    onStartAssistant(demoLanguage);
   };
 
   return (

@@ -17,7 +17,9 @@ import {
   MessageSquare,
   Shuffle,
   SlidersHorizontal,
-  Play
+  Play,
+  Zap,
+  CheckCircle2
 } from 'lucide-react';
 import { VoiceOrb, OrbState } from './VoiceOrb';
 import {
@@ -54,6 +56,15 @@ interface VoiceAssistantProps {
   }) => void;
 }
 
+const GEMINI_LIVE_VOICES = [
+  { id: 'Aoede', name: 'Aoede', description: 'Natural conversational soprano, warm and empathetic (Default)' },
+  { id: 'Fenrir', name: 'Fenrir', description: 'Resonant civic baritone, steady and articulate' },
+  { id: 'Kore', name: 'Kore', description: 'Supportive, friendly cadence for citizen guidance' },
+  { id: 'Charon', name: 'Charon', description: 'Clear and structured public policy narrator' },
+  { id: 'Zephyr', name: 'Zephyr', description: 'Bright, crisp, and balanced delivery' },
+  { id: 'Puck', name: 'Puck', description: 'Brisk and engaging conversational pace' }
+];
+
 export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
   initialLanguage = 'en',
   initialWorkflowId,
@@ -75,24 +86,24 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
   const [speechMuted, setSpeechMuted] = useState<boolean>(false);
   const [composerText, setComposerText] = useState<string>('');
   
-  // Voice engine mode
-  const [voiceMode, setVoiceMode] = useState<'browser_native' | 'gemini_live'>('browser_native');
+  // Gemini Live API state (Exclusive Voice Engine)
   const [liveSessionStatus, setLiveSessionStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
   const [liveError, setLiveError] = useState<string | null>(null);
+  const [selectedLiveVoice, setSelectedLiveVoice] = useState<string>('Aoede');
 
-  // Live streaming transcript
+  // Real-time live streaming transcripts from Live API
   const [interimTranscript, setInterimTranscript] = useState<string>('');
   
-  // Warm, empathetic human greeting for general-purpose conversational AI
+  // Human greeting for multilingual conversational AI
   const getHumanGreeting = (lang: SupportedLanguage) => {
     switch (lang) {
       case 'hi':
-        return 'नमस्ते। मैं वॉयसब्रिज एआई हूँ — आपका बहुभाषी साथी। आप शिक्षा, छात्रवृत्ति, करियर, विदेशी अध्ययन, सरकारी योजनाएं या किसी भी सामान्य विषय पर निसंकोच बात कर सकते हैं। आज आपके मन में क्या है?';
+        return 'नमस्ते। मैं वॉयसब्रिज एआई हूँ — आपका जेमिनी 3.8 लाइव वॉयस साथी। आप छात्रवृत्ति, करियर, सरकारी योजनाएं या किसी भी विषय पर स्वाभाविक रूप से बोल सकते हैं। आज आप क्या जानना चाहते हैं?';
       case 'te':
-        return 'నమస్కారం. నేను వాయిస్‌బ్రిడ్జ్ ఏఐ — మీ బహుభాషా సహాయకుడిని. ఉన్నత విద్య, స్కాలర్‌షిప్‌లు, ఉద్యోగాలు, ప్రభుత్వ పథకాలు లేదా ఏదైనా సందేహం గురించి నిస్సందేహంగా మాట్లాడండి. ఈ రోజు మీరు ఏ వివరాలు తెలుసుకోవాలనుకుంటున్నారు?';
+        return 'నమస్కారం. నేను వాయిస్‌బ్రిడ్జ్ ఏఐ — మీ జెమిని 3.8 లైవ్ వాయిస్ సహాయకుడిని. ఉన్నత విద్య, స్కాలర్‌షిప్‌లు, ఉద్యోగాలు, సంక్షేమ పథకాలు లేదా ఏదైనా విషయం గురించి సహజంగా మాట్లాడండి.';
       case 'en':
       default:
-        return "Hello! I'm VoiceBridge AI. Speak naturally about anything — from university applications and career planning to public schemes, translations, or daily questions. What's on your mind?";
+        return "Hello! I'm VoiceBridge AI, powered exclusively by Gemini 3.8 Live API. Speak naturally about anything — from scholarship schemes and career planning to public paperwork, translations, or daily questions.";
     }
   };
 
@@ -112,90 +123,42 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [promptBatchIndex, setPromptBatchIndex] = useState<number>(0);
 
-  // Natural Voice Settings
-  const [speechRate, setSpeechRate] = useState<number>(0.96);
-  const [speechPitch, setSpeechPitch] = useState<number>(1.0);
-  const [selectedVoiceURI, setSelectedVoiceURI] = useState<string>('');
-  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
-
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const liveSessionRef = useRef<GeminiLiveSession | null>(null);
   const initialPromptTriggered = useRef<boolean>(false);
   const selectedWorkflow = workflows.find(w => w.id === selectedWorkflowId);
 
-  // Load natural voices matching selected language
-  useEffect(() => {
-    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-      const loadVoices = () => {
-        const voices = voiceEngine.getVoicesForLanguage(language);
-        setAvailableVoices(voices);
-        if (voices.length > 0) {
-          const currentMatches = voices.some(v => v.voiceURI === selectedVoiceURI);
-          if (!currentMatches) {
-            setSelectedVoiceURI(voices[0].voiceURI);
-          }
-        }
-      };
-
-      loadVoices();
-      window.speechSynthesis.onvoiceschanged = loadVoices;
-    }
-  }, [language]);
-
-  // Synchronize voice settings to VoiceEngine
-  useEffect(() => {
-    voiceEngine.setSpeechSettings(speechRate, speechPitch, selectedVoiceURI || undefined);
-  }, [speechRate, speechPitch, selectedVoiceURI]);
-
-  // Keyboard shortcut: Spacebar or Escape instantly interrupts assistant speech
+  // Keyboard shortcut: Spacebar or Escape instantly interrupts Gemini Live speech
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       const isInput = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA');
       if (isInput) return;
 
-      if ((e.code === 'Space' || e.key === 'Escape') && orbState === 'speaking') {
+      if ((e.code === 'Space' || e.key === 'Escape') && (orbState === 'speaking' || liveSessionStatus === 'connected')) {
         e.preventDefault();
-        voiceEngine.cancelSpeech();
-        setOrbState('idle');
+        handleInterrupt();
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [orbState]);
+  }, [orbState, liveSessionStatus]);
 
-  const handleTestVoice = () => {
-    const sampleText = language === 'hi'
-      ? 'पोस्ट-मैट्रिक छात्रवृत्ति के लिए परिवार की वार्षिक आय ढाई लाख रुपये से कम होनी चाहिए। क्या आपका आय प्रमाण पत्र तैयार है?'
-      : language === 'te'
-      ? 'పోస్ట్-మెట్రిక్ స్కాలర్‌షిప్ కోసం వార్షిక ఆదాయం రెండున్నర లక్షల రూపాయల లోపు ఉండాలి. మీ దగ్గర సర్టిఫికేట్ సిద్ధంగా ఉందా?'
-      : "To qualify for the Post-Matric Scholarship, your family's annual income should be under 2.5 lakhs. Have you got your income certificate ready?";
-
-    voiceEngine.cancelSpeech();
-    voiceEngine.speak(
-      sampleText,
-      language,
-      () => setOrbState('speaking'),
-      () => setOrbState('idle'),
-      () => setOrbState('idle')
-    );
-  };
-
+  // Sync state upward
   useEffect(() => {
-    if (selectedWorkflow && onSelectWorkflowContext) {
-      onSelectWorkflowContext(selectedWorkflow);
+    if (onMessagesChange) onMessagesChange(messages);
+    if (messages.length > 2 && onIntelligenceChange) {
+      const intel = analyzeConversationIntelligence(messages, language);
+      onIntelligenceChange(intel);
     }
-  }, [selectedWorkflowId]);
+  }, [messages]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    onMessagesChange?.(messages);
-    const intel = analyzeConversationIntelligence(messages, language);
-    onIntelligenceChange?.(intel);
-  }, [messages, interimTranscript, language, onMessagesChange, onIntelligenceChange]);
+  }, [messages, interimTranscript]);
 
-  // Initial prompt auto-trigger if provided from Explore Services or Dashboard
+  // Handle initial prompt passed from another view
   useEffect(() => {
     if (initialPrompt && !initialPromptTriggered.current) {
       initialPromptTriggered.current = true;
@@ -203,21 +166,16 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
     }
   }, [initialPrompt]);
 
+  // Clean up Live API session on unmount
   useEffect(() => {
-    voiceEngine.setAudioLevelCallback((level) => {
-      if (voiceMode === 'browser_native') {
-        setAudioLevel(level);
-      }
-    });
-
     return () => {
-      voiceEngine.stopListening();
-      voiceEngine.cancelSpeech();
       if (liveSessionRef.current) {
         liveSessionRef.current.stop();
+        liveSessionRef.current = null;
       }
+      voiceEngine.cancelSpeech();
     };
-  }, [voiceMode]);
+  }, []);
 
   // Broad, open-ended conversational prompts covering all capabilities
   const getContextualPrompts = (): Array<{ text: string; kicker: string }> => {
@@ -308,56 +266,89 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
     return ALL_PROMPTS[promptBatchIndex % ALL_PROMPTS.length];
   };
 
-  const handleToggleVoiceMode = async (mode: 'browser_native' | 'gemini_live') => {
-    voiceEngine.stopListening();
+  /**
+   * Connects and maintains the Gemini 3.8 Live API real-time audio session.
+   * Exclusively streams 16kHz microphone input to Gemini Live API and plays 24kHz response audio.
+   */
+  const connectLiveSession = async (lang: SupportedLanguage = language, voice: string = selectedLiveVoice) => {
     voiceEngine.cancelSpeech();
+    setLiveSessionStatus('connecting');
+    setLiveError(null);
+    setOrbState('thinking');
+
     if (liveSessionRef.current) {
       liveSessionRef.current.stop();
       liveSessionRef.current = null;
     }
-    setOrbState('idle');
-    setLiveError(null);
-    setVoiceMode(mode);
 
-    if (mode === 'gemini_live') {
-      const live = new GeminiLiveSession();
-      liveSessionRef.current = live;
+    const live = new GeminiLiveSession(lang, voice, 'assistant', selectedWorkflow?.title || '');
+    liveSessionRef.current = live;
 
-      live.onStatusChange = (st, err) => {
-        setLiveSessionStatus(st);
-        if (st === 'connected') {
-          setOrbState('listening');
-        } else if (st === 'error') {
-          setOrbState('idle');
-          setLiveError(err || 'Failed to connect to Live API session');
-        } else if (st === 'disconnected') {
-          setOrbState('idle');
-        }
-      };
-
-      live.onAudioActivity = (level) => {
-        setAudioLevel(level);
-        if (level > 0.08) {
-          setOrbState('speaking');
-        } else {
-          setOrbState('listening');
-        }
-      };
-
-      try {
-        await live.start();
-      } catch (err: any) {
-        setLiveError(err.message || 'Failed to start Live session');
+    live.onStatusChange = (st, err) => {
+      setLiveSessionStatus(st);
+      if (st === 'connected') {
+        setOrbState('listening');
+      } else if (st === 'error') {
+        setOrbState('idle');
+        setLiveError(err || 'Gemini Live API connection interrupted.');
+      } else if (st === 'disconnected') {
+        setOrbState('idle');
       }
-    } else {
-      setLiveSessionStatus('disconnected');
+    };
+
+    live.onAudioActivity = (level, source) => {
+      setAudioLevel(level);
+      if (source === 'model' && level > 0.05) {
+        setOrbState('speaking');
+      } else if (source === 'mic' && level > 0.08) {
+        setOrbState('listening');
+      }
+    };
+
+    live.onInputTranscript = (text) => {
+      setInterimTranscript(text);
+    };
+
+    live.onOutputTranscript = (text) => {
+      setInterimTranscript('');
+      setOrbState('speaking');
+
+      setMessages(prev => {
+        const last = prev[prev.length - 1];
+        if (last && last.sender === 'assistant' && last.id.startsWith('live-stream-')) {
+          return [...prev.slice(0, -1), { ...last, text: (last.text + ' ' + text).trim() }];
+        } else {
+          return [...prev, {
+            id: `live-stream-${Date.now()}`,
+            sender: 'assistant',
+            text,
+            language: lang,
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          }];
+        }
+      });
+    };
+
+    live.onInterrupted = () => {
+      setOrbState('listening');
+    };
+
+    live.onTurnComplete = () => {
+      setInterimTranscript('');
+      setOrbState('listening');
+    };
+
+    try {
+      await live.start(lang, voice, 'assistant', selectedWorkflow?.title);
+    } catch (err: any) {
+      setLiveError(err.message || 'Failed to initialize Gemini Live API session');
+      setOrbState('idle');
     }
   };
 
   const handleLanguageChange = (newLang: SupportedLanguage) => {
     setLanguage(newLang);
     voiceEngine.cancelSpeech();
-    voiceEngine.stopListening();
     setOrbState('idle');
 
     const greeting = getHumanGreeting(newLang);
@@ -370,62 +361,33 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
     };
 
     setMessages(prev => [...prev, greetingMsg]);
-    if (!speechMuted && voiceMode === 'browser_native') {
-      voiceEngine.speak(
-        greeting,
-        newLang,
-        () => setOrbState('speaking'),
-        () => setOrbState('idle'),
-        () => setOrbState('idle')
-      );
+
+    // If already connected in Live API, reconnect with the new language instruction
+    if (liveSessionRef.current?.isLiveConnected()) {
+      connectLiveSession(newLang, selectedLiveVoice);
     }
   };
 
   const handleToggleListening = () => {
-    if (voiceMode === 'gemini_live') {
-      if (liveSessionStatus === 'connected') {
-        liveSessionRef.current?.stop();
-        setLiveSessionStatus('disconnected');
-        setOrbState('idle');
-      } else {
-        handleToggleVoiceMode('gemini_live');
-      }
-      return;
-    }
-
-    if (orbState === 'listening') {
-      voiceEngine.stopListening();
+    if (liveSessionRef.current?.isLiveConnected()) {
+      liveSessionRef.current.stop();
+      setLiveSessionStatus('disconnected');
       setOrbState('idle');
-      return;
+    } else {
+      connectLiveSession(language, selectedLiveVoice);
     }
+  };
 
-    // If currently speaking, interrupt immediately and start listening!
+  const handleInterrupt = () => {
+    if (liveSessionRef.current) {
+      liveSessionRef.current.interrupt();
+    }
     voiceEngine.cancelSpeech();
-    setInterimTranscript('');
     setOrbState('listening');
-
-    voiceEngine.startListening(
-      language,
-      (transcript, isFinal) => {
-        if (isFinal) {
-          setInterimTranscript('');
-          handleUserQuery(transcript);
-        } else {
-          setInterimTranscript(transcript);
-        }
-      },
-      (err) => {
-        console.warn('Voice notice:', err);
-        setOrbState('idle');
-      },
-      () => setOrbState('listening')
-    );
   };
 
   const handleUserQuery = async (queryText: string) => {
     if (!queryText.trim()) return;
-
-    voiceEngine.stopListening();
 
     const userMsg: ChatMessage = {
       id: `usr-${Date.now()}`,
@@ -436,8 +398,16 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
     };
 
     setMessages(prev => [...prev, userMsg]);
-    setOrbState('thinking');
 
+    // If Gemini Live is connected, send text into the bidirectional stream directly
+    if (liveSessionRef.current?.isLiveConnected()) {
+      setOrbState('thinking');
+      liveSessionRef.current.sendText(queryText);
+      return;
+    }
+
+    // If not connected, connect Live session with this prompt as topic, or generate spoken response
+    setOrbState('thinking');
     try {
       const historyFormatted = messages.map(m => ({ sender: m.sender, text: m.text }));
       const response = await sendVoiceMessage(queryText, language, selectedWorkflowId, historyFormatted);
@@ -480,18 +450,29 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
     );
   };
 
+  const handleTestVoice = () => {
+    voiceEngine.previewVoice(
+      'natural',
+      1.0,
+      language,
+      () => setOrbState('speaking'),
+      () => setOrbState('idle'),
+      () => setOrbState('idle')
+    );
+  };
+
   const handleRestart = () => {
-    voiceEngine.cancelSpeech();
-    voiceEngine.stopListening();
     if (liveSessionRef.current) {
       liveSessionRef.current.stop();
-      setLiveSessionStatus('disconnected');
+      liveSessionRef.current = null;
     }
+    voiceEngine.cancelSpeech();
     setOrbState('idle');
-    setInterimTranscript('');
+    setLiveError(null);
+    setLiveSessionStatus('disconnected');
     setMessages([
       {
-        id: `rst-${Date.now()}`,
+        id: `msg-${Date.now()}`,
         sender: 'assistant',
         text: getHumanGreeting(language),
         language,
@@ -501,24 +482,28 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
   };
 
   const handleEnd = () => {
-    voiceEngine.cancelSpeech();
-    voiceEngine.stopListening();
     if (liveSessionRef.current) {
       liveSessionRef.current.stop();
+      liveSessionRef.current = null;
     }
-    const duration = Math.max(12, Math.round((Date.now() - sessionStartTime) / 1000));
-    
-    const firstUserQuery = messages.find(m => m.sender === 'user')?.text;
-    const title = firstUserQuery
-      ? firstUserQuery.slice(0, 38) + (firstUserQuery.length > 38 ? '...' : '')
-      : selectedWorkflow ? selectedWorkflow.title : 'General Inquiry';
+    voiceEngine.cancelSpeech();
+    setOrbState('idle');
+
+    const durationSeconds = Math.max(15, Math.round((Date.now() - sessionStartTime) / 1000));
+    const title =
+      selectedWorkflow?.title ||
+      messages.find(m => m.sender === 'user')?.text.slice(0, 48) ||
+      'Multilingual Voice Consultation';
+
+    const intel = messages.length > 2 ? analyzeConversationIntelligence(messages, language) : undefined;
 
     onEndConversation({
       language,
       workflowId: selectedWorkflowId,
       messages,
-      durationSeconds: duration,
-      title
+      durationSeconds,
+      title,
+      intelligence: intel
     });
   };
 
@@ -529,12 +514,14 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
   };
 
   const handleExportTranscript = () => {
-    const formatted = messages.map(m => `[${m.timestamp}] ${m.sender.toUpperCase()} (${m.language}):\n${m.text}\n`).join('\n---\n\n');
+    const formatted = messages
+      .map(m => `[${m.timestamp}] ${m.sender.toUpperCase()}: ${m.text}`)
+      .join('\n\n');
     const blob = new Blob([formatted], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `voicebridge-session-${Date.now()}.txt`;
+    a.download = `voicebridge-live-session-${Date.now()}.txt`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -542,83 +529,88 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
   const contextualPrompts = getContextualPrompts();
 
   return (
-    <div className="flex-1 flex flex-col justify-between max-w-3xl mx-auto w-full px-4 sm:px-6 py-5 md:py-7 space-y-6 select-none text-[#F5EFE6]">
+    <div className="flex-1 flex flex-col justify-between max-w-4xl mx-auto w-full px-4 sm:px-6 py-4 md:py-6 relative select-none">
       
-      {/* Top Refined Bar: Context Scheme & Language Tabs */}
-      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pb-3 border-b border-[#F5EFE6]/7">
+      {/* 1. Header Toolbar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#F5EFE6]/7">
         
-        {/* Intelligent Optional Mode Selector */}
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] uppercase font-semibold text-[#A89F91] tracking-widest font-sans">
-            Mode:
-          </span>
-          <select
-            value={selectedWorkflowId || ''}
-            onChange={(e) => setSelectedWorkflowId(e.target.value || undefined)}
-            className="bg-[#141311] text-xs font-semibold text-[#E0A364] border border-[#F5EFE6]/10 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-[#C87A4B] cursor-pointer"
-          >
-            <option value="">Ask me anything (Open Conversation)</option>
-            {workflows.length > 0 && (
-              <optgroup label="Focus on Tracked Workflow">
-                {workflows.map(wf => (
-                  <option key={wf.id} value={wf.id}>Focus: {wf.title}</option>
-                ))}
-              </optgroup>
-            )}
-          </select>
-        </div>
-
-        {/* Seamless Language Tabs */}
-        <div className="flex items-center gap-1 bg-[#141311] p-1 rounded-xl border border-[#F5EFE6]/6">
-          {SUPPORTED_LANGUAGES.map((lang) => (
-            <button
-              key={lang.code}
-              onClick={() => handleLanguageChange(lang.code)}
-              className={`px-3 py-1 text-xs font-medium rounded-lg transition-all cursor-pointer ${
-                language === lang.code
-                  ? 'bg-[#C87A4B] text-[#0D0D0C] font-bold shadow-sm'
-                  : 'text-[#A89F91] hover:text-[#F5EFE6]'
-              }`}
+        {/* Left: General Context Indicator */}
+        <div className="flex items-center gap-3">
+          <div className="relative">
+            <select
+              value={selectedWorkflowId || ''}
+              onChange={(e) => {
+                const wfId = e.target.value || undefined;
+                setSelectedWorkflowId(wfId);
+                const wf = workflows.find(w => w.id === wfId) || null;
+                if (onSelectWorkflowContext) onSelectWorkflowContext(wf);
+              }}
+              className="bg-[#141311] border border-[#F5EFE6]/10 rounded-xl px-3 py-1.5 text-xs text-[#FAF6F0] focus:outline-none focus:border-[#C87A4B] cursor-pointer"
             >
-              <span>{lang.nativeName}</span>
-            </button>
-          ))}
+              <option value="">Ask me anything (Open Conversation)</option>
+              {workflows.map(wf => (
+                <option key={wf.id} value={wf.id}>
+                  {wf.title}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {selectedWorkflow && (
+            <span className="hidden md:inline-flex text-[11px] font-mono text-[#E0A364] px-2 py-0.5 rounded bg-[#1A1816] border border-[#C87A4B]/20">
+              {selectedWorkflow.progress}% fulfilled
+            </span>
+          )}
         </div>
 
-        {/* Engine mode switcher, voice style & transcript drawer toggle */}
-        <div className="flex items-center gap-2">
+        {/* Right: Language, Voice Settings, Gemini Live Status, Transcript Drawer */}
+        <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
+          
+          {/* Language Switcher */}
+          <div className="flex items-center bg-[#141311] p-1 rounded-xl border border-[#F5EFE6]/7">
+            {SUPPORTED_LANGUAGES.map((lang) => (
+              <button
+                key={lang.code}
+                onClick={() => handleLanguageChange(lang.code)}
+                className={`px-2.5 py-1 text-xs font-medium rounded-lg transition-all cursor-pointer ${
+                  language === lang.code
+                    ? 'bg-[#C87A4B] text-[#0D0D0C] font-semibold shadow-sm'
+                    : 'text-[#A89F91] hover:text-[#FAF6F0]'
+                }`}
+              >
+                <span>{lang.nativeName}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Voice Persona Selector */}
           <button
             onClick={() => setShowVoiceSettings(!showVoiceSettings)}
             className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors flex items-center gap-1.5 cursor-pointer ${
               showVoiceSettings
                 ? 'bg-[#C87A4B]/20 border-[#C87A4B] text-[#C87A4B]'
-                : 'bg-[#141311] border-[#F5EFE6]/10 text-[#A89F91] hover:text-[#F5EFE6]'
+                : 'bg-[#141311] border-[#F5EFE6]/10 text-[#A89F91] hover:text-[#FAF6F0]'
             }`}
-            title="Voice Cadence & Neural Settings"
+            title="Configure Gemini Live Voice Persona"
           >
             <SlidersHorizontal className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Voice Style</span>
+            <span className="hidden sm:inline">Voice: {selectedLiveVoice}</span>
           </button>
 
-          <button
-            onClick={() => handleToggleVoiceMode(voiceMode === 'gemini_live' ? 'browser_native' : 'gemini_live')}
-            className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors flex items-center gap-1.5 cursor-pointer ${
-              voiceMode === 'gemini_live'
-                ? 'bg-[#3A1D13] border-[#E0A364]/40 text-[#F5EFE6]'
-                : 'bg-[#141311] border-[#F5EFE6]/10 text-[#A89F91] hover:text-[#F5EFE6]'
-            }`}
-            title="Toggle between Gemini 3.8 Live API and Native Speech Engine"
-          >
-            <Radio className={`w-3.5 h-3.5 ${voiceMode === 'gemini_live' ? 'text-[#C87A4B] animate-pulse' : 'text-[#A89F91]'}`} />
-            <span>{voiceMode === 'gemini_live' ? 'Live API' : 'Native Voice'}</span>
-          </button>
+          {/* Exclusive Gemini Live API Status Badge */}
+          <div className="px-2.5 py-1 rounded-lg text-xs font-medium border border-[#C87A4B]/40 bg-[#141311] text-[#FAF6F0] flex items-center gap-2 shadow-sm">
+            <span className={`w-2 h-2 rounded-full ${liveSessionStatus === 'connected' ? 'bg-emerald-400 animate-pulse' : liveSessionStatus === 'connecting' ? 'bg-[#C87A4B] animate-pulse' : 'bg-[#A89F91]'}`} />
+            <span className="font-mono text-[11px] text-[#E0A364]">
+              {liveSessionStatus === 'connected' ? 'Gemini 3.8 Live API Active · 24kHz' : liveSessionStatus === 'connecting' ? 'Connecting Live API...' : 'Gemini Live Ready'}
+            </span>
+          </div>
 
           <button
             onClick={() => setShowHistory(!showHistory)}
             className={`p-1.5 rounded-lg border text-xs transition-colors cursor-pointer ${
               showHistory
                 ? 'bg-[#C87A4B]/20 border-[#C87A4B] text-[#C87A4B]'
-                : 'bg-[#141311] border-[#F5EFE6]/10 text-[#A89F91] hover:text-[#F5EFE6]'
+                : 'bg-[#141311] border-[#F5EFE6]/10 text-[#A89F91] hover:text-[#FAF6F0]'
             }`}
             title="Toggle Session History"
           >
@@ -627,6 +619,14 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
         </div>
 
       </div>
+
+      {/* Live Error Notification */}
+      {liveError && (
+        <div className="mt-2 p-3 rounded-xl bg-red-950/40 border border-red-500/40 text-xs text-red-200 flex items-center justify-between">
+          <span>{liveError}</span>
+          <button onClick={() => setLiveError(null)} className="text-red-300 hover:text-white cursor-pointer">&times;</button>
+        </div>
+      )}
 
       {/* Voice Settings Panel (Collapsible) */}
       <AnimatePresence>
@@ -637,12 +637,12 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
             exit={{ opacity: 0, height: 0 }}
             className="overflow-hidden"
           >
-            <div className="p-4 rounded-2xl bg-[#141311] border border-[#C87A4B]/30 space-y-4 max-w-2xl mx-auto shadow-xl">
+            <div className="p-4 rounded-2xl bg-[#141311] border border-[#C87A4B]/30 space-y-4 max-w-2xl mx-auto shadow-xl my-2">
               <div className="flex items-center justify-between pb-2 border-b border-[#F5EFE6]/6">
                 <div className="flex items-center gap-2">
-                  <SlidersHorizontal className="w-4 h-4 text-[#C87A4B]" />
-                  <span className="text-xs font-bold text-[#F5EFE6] uppercase tracking-wider">
-                    Conversational Voice Settings
+                  <Radio className="w-4 h-4 text-[#C87A4B]" />
+                  <span className="text-xs font-bold text-[#FAF6F0] uppercase tracking-wider">
+                    Gemini Live Voice Persona
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
@@ -655,80 +655,48 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
                   </button>
                   <button
                     onClick={() => setShowVoiceSettings(false)}
-                    className="text-xs text-[#A89F91] hover:text-[#F5EFE6] cursor-pointer"
+                    className="text-xs text-[#A89F91] hover:text-[#FAF6F0] cursor-pointer"
                   >
                     &times;
                   </button>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-                {/* Speaking Cadence */}
-                <div className="space-y-1.5">
-                  <label className="text-[11px] font-semibold text-[#A89F91] block">
-                    Speaking Cadence (Pacing)
-                  </label>
-                  <div className="grid grid-cols-3 gap-1.5 bg-[#0D0D0C] p-1 rounded-xl border border-[#F5EFE6]/5">
-                    {[
-                      { label: 'Relaxed', rate: 0.90 },
-                      { label: 'Natural', rate: 0.96 },
-                      { label: 'Brisk', rate: 1.05 }
-                    ].map(opt => (
-                      <button
-                        key={opt.label}
-                        onClick={() => setSpeechRate(opt.rate)}
-                        className={`py-1.5 px-2 rounded-lg text-center font-medium transition-all cursor-pointer ${
-                          Math.abs(speechRate - opt.rate) < 0.02
-                            ? 'bg-[#C87A4B] text-[#0D0D0C] font-bold shadow'
-                            : 'text-[#A89F91] hover:text-[#F5EFE6]'
-                        }`}
-                      >
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                  <span className="text-[10px] text-[#A89F91] block">
-                    {speechRate === 0.96 ? 'Natural human pacing with gentle pauses' : speechRate < 0.95 ? 'Deliberate, easy to follow' : 'Faster information delivery'}
-                  </span>
-                </div>
-
-                {/* Voice Selection for Language */}
-                <div className="space-y-1.5">
-                  <label className="text-[11px] font-semibold text-[#A89F91] block">
-                    Detected Voice ({availableVoices.length} available)
-                  </label>
-                  <select
-                    value={selectedVoiceURI}
-                    onChange={(e) => setSelectedVoiceURI(e.target.value)}
-                    className="w-full bg-[#0D0D0C] border border-[#F5EFE6]/10 rounded-xl px-2.5 py-1.5 text-xs text-[#E0A364] focus:outline-none focus:border-[#C87A4B] cursor-pointer"
+              {/* Gemini Live Persona Selection */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {GEMINI_LIVE_VOICES.map((v) => (
+                  <button
+                    key={v.id}
+                    onClick={() => {
+                      setSelectedLiveVoice(v.id);
+                      if (liveSessionRef.current?.isLiveConnected()) {
+                        connectLiveSession(language, v.id);
+                      }
+                    }}
+                    className={`p-2.5 rounded-xl border text-left transition-all cursor-pointer ${
+                      selectedLiveVoice === v.id
+                        ? 'bg-[#1F1C18] border-[#C87A4B] text-[#FAF6F0] ring-1 ring-[#C87A4B]/40'
+                        : 'bg-[#0D0D0C] border-[#F5EFE6]/6 text-[#A89F91] hover:border-[#F5EFE6]/20'
+                    }`}
                   >
-                    {availableVoices.length > 0 ? (
-                      availableVoices.map(v => (
-                        <option key={v.voiceURI} value={v.voiceURI}>
-                          {v.name} ({v.lang})
-                        </option>
-                      ))
-                    ) : (
-                      <option value="">Default System Natural Voice</option>
-                    )}
-                  </select>
-                  <span className="text-[10px] text-[#A89F91] block">
-                    Neural &amp; Natural voices prioritized automatically
-                  </span>
-                </div>
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-xs text-[#FAF6F0]">{v.name}</span>
+                      {selectedLiveVoice === v.id && <CheckCircle2 className="w-3.5 h-3.5 text-[#C87A4B]" />}
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-[#A89F91] line-clamp-1">
+                      {v.description}
+                    </p>
+                  </button>
+                ))}
               </div>
 
-              {/* Expressive Intelligence Features */}
-              <div className="pt-2 border-t border-[#F5EFE6]/5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-[#A89F91]">
-                <div className="flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                  <span>Micro-Pauses &amp; Dynamic Intonation: <strong>Active</strong></span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="font-mono text-[10px] bg-[#1C1A17] px-2 py-0.5 rounded text-[#C87A4B]">
-                    Press Space / Esc to interrupt
-                  </span>
-                </div>
+              <div className="pt-2 border-t border-[#F5EFE6]/5 flex items-center justify-between text-[11px] text-[#A89F91]">
+                <span className="font-mono text-[10px] text-[#C87A4B]">
+                  Live API 16kHz PCM In · 24kHz PCM Out
+                </span>
+                <span className="font-mono text-[10px] bg-[#1C1A17] px-2 py-0.5 rounded text-[#A89F91]">
+                  Press Space / Esc to interrupt
+                </span>
               </div>
             </div>
           </motion.div>
@@ -744,7 +712,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
           size="lg"
         />
 
-        {/* Live Interruption Controls when Assistant is Speaking */}
+        {/* Live Interruption Controls when Assistant is Speaking or Connected */}
         {orbState === 'speaking' && (
           <motion.div
             initial={{ opacity: 0, y: -4 }}
@@ -752,14 +720,11 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
             className="flex items-center gap-2 mt-3"
           >
             <button
-              onClick={() => {
-                voiceEngine.cancelSpeech();
-                setOrbState('idle');
-              }}
+              onClick={handleInterrupt}
               className="px-3.5 py-1.5 rounded-full bg-[#2A1713] hover:bg-[#381F19] text-[#E0A364] border border-[#E0A364]/30 text-xs font-medium flex items-center gap-1.5 transition-all cursor-pointer shadow-md"
             >
               <Square className="w-3 h-3 text-[#C87A4B] fill-current" />
-              <span>Pause Voice</span>
+              <span>Pause / Interrupt</span>
             </button>
 
             <button
@@ -773,38 +738,38 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
         )}
 
         <div className="mt-4 text-center space-y-1.5 max-w-xl mx-auto">
-          <p className="font-editorial text-2xl sm:text-3xl text-[#F5EFE6] tracking-wide font-bold">
+          <p className="font-editorial text-2xl sm:text-3xl text-[#FAF6F0] tracking-wide font-bold">
             {orbState === 'listening'
               ? 'Listening intently... Speak naturally in your language'
               : orbState === 'thinking'
-              ? 'Understanding your request & consulting verified sources...'
+              ? 'Gemini Live is processing...'
               : orbState === 'speaking'
-              ? 'Speaking response in native cadence...'
+              ? 'Gemini Live speaking response...'
               : "What's on your mind? Just speak."}
           </p>
           <p className="text-xs sm:text-sm text-[#A89F91]">
             {language === 'hi'
-              ? 'शिक्षा, छात्रवृत्ति, विदेशी अध्ययन, करियर, सरकारी सेवाएं या अनुवाद — बिना किसी श्रेणी चयन के बोलें।'
+              ? 'जेमिनी 3.8 लाइव एपीआई के साथ सीधे बात करें — शिक्षा, छात्रवृत्ति, विदेशी अध्ययन, या कोई भी सवाल पूछें।'
               : language === 'te'
-              ? 'ఉన్నత విద్య, స్కాలర్‌షిప్‌లు, ఉద్యోగాలు, ప్రభుత్వ సేవలు లేదా అనువాదం — మీ భాషలో మాట్లాడండి.'
-              : 'Ask about scholarships, studying in Germany, loans, resume prep, translations, or any topic.'}
+              ? 'జెమిని 3.8 లైవ్ ఏపీఐతో నేరుగా మాట్లాడండి — విద్య, స్కాలర్‌షిప్‌లు, ఉద్యోగాలు లేదా ఏదైనా ప్రశ్న అడగండి.'
+              : 'Streaming directly via Gemini 3.8 Live API with real-time audio and natural interruption.'}
           </p>
         </div>
       </div>
 
-      {/* Live Elegant Interim Streaming Transcript */}
+      {/* Live Interim Streaming Transcript */}
       {interimTranscript && (
         <div className="p-3.5 rounded-2xl bg-[#181512] border border-[#C87A4B]/35 text-[#E0A364] text-sm animate-pulse text-center font-editorial italic max-w-xl mx-auto w-full shadow-lg">
           "{interimTranscript}..."
         </div>
       )}
 
-      {/* Beautiful Conversational Exchange Card */}
+      {/* Conversational Exchange Card */}
       {messages.length > 0 && !interimTranscript && (
         <div className="p-5 sm:p-6 rounded-2xl bg-[#141311] border border-[#F5EFE6]/7 max-w-2xl mx-auto w-full space-y-3 shadow-xl">
           <div className="flex items-center justify-between text-xs text-[#A89F91] pb-2 border-b border-[#F5EFE6]/6">
-            <span className="font-editorial text-sm text-[#F5EFE6] font-bold">
-              {messages[messages.length - 1].sender === 'assistant' ? 'VoiceBridge AI' : 'Citizen'}
+            <span className="font-editorial text-sm text-[#FAF6F0] font-bold">
+              {messages[messages.length - 1].sender === 'assistant' ? 'VoiceBridge AI (Gemini Live)' : 'Citizen'}
             </span>
             <div className="flex items-center gap-3">
               <span className="tabular-nums font-mono text-[11px]">
@@ -813,7 +778,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
               {messages[messages.length - 1].sender === 'assistant' && (
                 <button
                   onClick={() => handleReplayAudio(messages[messages.length - 1])}
-                  className="hover:text-[#F5EFE6] flex items-center gap-1 transition-colors cursor-pointer text-[#C87A4B]"
+                  className="hover:text-[#FAF6F0] flex items-center gap-1 transition-colors cursor-pointer text-[#C87A4B]"
                   title="Replay Spoken Audio"
                 >
                   <Volume2 className="w-3.5 h-3.5" />
@@ -822,7 +787,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
               )}
               <button
                 onClick={() => handleCopy(messages[messages.length - 1].text, messages[messages.length - 1].id)}
-                className="hover:text-[#F5EFE6] transition-colors cursor-pointer"
+                className="hover:text-[#FAF6F0] transition-colors cursor-pointer"
                 title="Copy text"
               >
                 {copiedId === messages[messages.length - 1].id ? (
@@ -834,13 +799,13 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
             </div>
           </div>
 
-          <p className="text-sm sm:text-base text-[#F5EFE6] leading-relaxed font-sans font-normal">
+          <p className="text-sm sm:text-base text-[#FAF6F0] leading-relaxed font-sans font-normal">
             {messages[messages.length - 1].text}
           </p>
         </div>
       )}
 
-      {/* Contextual Suggested Questions with Shuffle */}
+      {/* Suggested Questions */}
       <div className="space-y-2 max-w-2xl mx-auto w-full">
         <div className="flex items-center justify-between text-[11px] text-[#A89F91] px-1">
           <span className="uppercase tracking-wider font-semibold text-[10px]">
@@ -865,7 +830,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
               <span className="text-[10px] text-[#C87A4B] font-mono block uppercase tracking-wider mb-1">
                 {p.kicker}
               </span>
-              <span className="text-xs text-[#F5EFE6] font-medium block leading-snug line-clamp-2">
+              <span className="text-xs text-[#FAF6F0] font-medium block leading-snug line-clamp-2">
                 {p.text}
               </span>
             </button>
@@ -873,7 +838,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
         </div>
       </div>
 
-      {/* Improved Unified Message Composer & Mic Controls */}
+      {/* Unified Message Composer & Mic Controls */}
       <div className="pt-2 border-t border-[#F5EFE6]/7 space-y-3">
         
         {/* Composer Row */}
@@ -893,12 +858,12 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
             onClick={handleToggleListening}
             className={`p-3 rounded-xl font-semibold transition-all flex items-center justify-center shrink-0 cursor-pointer shadow-md ${
               orbState === 'listening' || liveSessionStatus === 'connected'
-                ? 'bg-[#3A1D13] text-[#F5EFE6] border border-[#C87A4B]/50'
+                ? 'bg-[#3A1D13] text-[#FAF6F0] border border-[#C87A4B]/50'
                 : 'bg-[#C87A4B] text-[#0D0D0C] hover:bg-[#D48354]'
             }`}
-            title={orbState === 'listening' ? 'Stop Listening' : 'Start Speaking'}
+            title={liveSessionStatus === 'connected' ? 'Disconnect Gemini Live Session' : 'Connect Gemini 3.8 Live API'}
           >
-            {orbState === 'listening' || liveSessionStatus === 'connected' ? (
+            {liveSessionStatus === 'connected' ? (
               <MicOff className="w-4 h-4" />
             ) : (
               <Mic className="w-4 h-4" />
@@ -911,7 +876,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
             value={composerText}
             onChange={(e) => setComposerText(e.target.value)}
             placeholder={`Speak or type in ${SUPPORTED_LANGUAGES.find(l => l.code === language)?.nativeName}...`}
-            className="flex-1 px-4 py-2.5 bg-[#141311] border border-[#F5EFE6]/10 rounded-xl text-xs sm:text-sm text-[#F5EFE6] placeholder-[#A89F91] focus:outline-none focus:border-[#C87A4B] transition-colors font-sans"
+            className="flex-1 px-4 py-2.5 bg-[#141311] border border-[#F5EFE6]/10 rounded-xl text-xs sm:text-sm text-[#FAF6F0] placeholder-[#A89F91] focus:outline-none focus:border-[#C87A4B] transition-colors font-sans"
           />
 
           {composerText.trim() ? (
@@ -928,7 +893,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
                 <button
                   type="button"
                   onClick={onOpenChatAdvisor}
-                  className="p-2.5 rounded-xl bg-[#141311] border border-[#F5EFE6]/10 text-[#A89F91] hover:text-[#F5EFE6] transition-colors shrink-0 cursor-pointer"
+                  className="p-2.5 rounded-xl bg-[#141311] border border-[#F5EFE6]/10 text-[#A89F91] hover:text-[#FAF6F0] transition-colors shrink-0 cursor-pointer"
                   title="Search & Legal Advisor (Gemini)"
                 >
                   <MessageSquare className="w-4 h-4" />
@@ -938,7 +903,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
                 <button
                   type="button"
                   onClick={onOpenTranscriber}
-                  className="p-2.5 rounded-xl bg-[#141311] border border-[#F5EFE6]/10 text-[#A89F91] hover:text-[#F5EFE6] transition-colors shrink-0 cursor-pointer"
+                  className="p-2.5 rounded-xl bg-[#141311] border border-[#F5EFE6]/10 text-[#A89F91] hover:text-[#FAF6F0] transition-colors shrink-0 cursor-pointer"
                   title="Transcribe Voice Recording (gemini-3.5-transcribe)"
                 >
                   <Sparkles className="w-4 h-4 text-[#C87A4B]" />
@@ -956,9 +921,9 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
             className={`p-2.5 rounded-xl border text-xs transition-colors shrink-0 cursor-pointer ${
               speechMuted
                 ? 'bg-[#1C1A17] border-[#C87A4B] text-[#C87A4B]'
-                : 'bg-[#141311] border-[#F5EFE6]/10 text-[#A89F91] hover:text-[#F5EFE6]'
+                : 'bg-[#141311] border-[#F5EFE6]/10 text-[#A89F91] hover:text-[#FAF6F0]'
             }`}
-            title={speechMuted ? 'Unmute Audio Speech' : 'Mute Audio Speech'}
+            title={speechMuted ? 'Unmute Audio' : 'Mute Audio'}
           >
             {speechMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
           </button>
@@ -966,7 +931,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
           <button
             type="button"
             onClick={handleRestart}
-            className="p-2.5 rounded-xl bg-[#141311] border border-[#F5EFE6]/10 text-[#A89F91] hover:text-[#F5EFE6] transition-colors shrink-0 cursor-pointer"
+            className="p-2.5 rounded-xl bg-[#141311] border border-[#F5EFE6]/10 text-[#A89F91] hover:text-[#FAF6F0] transition-colors shrink-0 cursor-pointer"
             title="Refresh Session"
           >
             <RotateCcw className="w-4 h-4" />
@@ -975,7 +940,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
           <button
             type="button"
             onClick={handleEnd}
-            className="px-3 py-2 text-xs font-semibold text-[#F5EFE6] bg-[#1C1A17] hover:bg-[#23201C] border border-[#F5EFE6]/10 rounded-xl transition-colors shrink-0 cursor-pointer flex items-center gap-1.5"
+            className="px-3 py-2 text-xs font-semibold text-[#FAF6F0] bg-[#1C1A17] hover:bg-[#23201C] border border-[#F5EFE6]/10 rounded-xl transition-colors shrink-0 cursor-pointer flex items-center gap-1.5"
           >
             <Square className="w-3 h-3 text-[#C87A4B]" />
             <span className="hidden sm:inline">End &amp; Save</span>
@@ -988,20 +953,20 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
       {showHistory && (
         <div className="fixed inset-y-0 right-0 z-40 w-80 max-w-[90vw] bg-[#121110] border-l border-[#F5EFE6]/8 p-5 flex flex-col justify-between shadow-2xl animate-in slide-in-from-right duration-200">
           <div className="flex items-center justify-between pb-3 border-b border-[#F5EFE6]/7">
-            <span className="font-editorial text-base font-bold text-[#F5EFE6]">
+            <span className="font-editorial text-base font-bold text-[#FAF6F0]">
               Session Transcript
             </span>
             <div className="flex items-center gap-2">
               <button
                 onClick={handleExportTranscript}
-                className="p-1 text-[#A89F91] hover:text-[#F5EFE6] rounded transition-colors cursor-pointer"
+                className="p-1 text-[#A89F91] hover:text-[#FAF6F0] rounded transition-colors cursor-pointer"
                 title="Download transcript"
               >
                 <Download className="w-4 h-4" />
               </button>
               <button
                 onClick={() => setShowHistory(false)}
-                className="p-1 text-[#A89F91] hover:text-[#F5EFE6] rounded cursor-pointer"
+                className="p-1 text-[#A89F91] hover:text-[#FAF6F0] rounded cursor-pointer"
               >
                 &times;
               </button>
@@ -1014,13 +979,13 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
                 key={m.id}
                 className={`p-3 rounded-xl border ${
                   m.sender === 'user'
-                    ? 'bg-[#1A1714] border-[#C87A4B]/30 text-[#F5EFE6]'
+                    ? 'bg-[#1A1714] border-[#C87A4B]/30 text-[#FAF6F0]'
                     : 'bg-[#141311] border-[#F5EFE6]/6 text-[#A89F91]'
                 }`}
               >
                 <div className="flex items-center justify-between text-[10px] text-[#A89F91] mb-1">
                   <span className="font-semibold text-[#E0A364] uppercase tracking-wider">
-                    {m.sender === 'user' ? 'Citizen' : 'VoiceBridge AI'}
+                    {m.sender === 'user' ? 'Citizen' : 'VoiceBridge AI (Gemini Live)'}
                   </span>
                   <span className="tabular-nums font-mono">{m.timestamp}</span>
                 </div>
@@ -1032,7 +997,7 @@ export const VoiceAssistant: React.FC<VoiceAssistantProps> = ({
 
           <div className="pt-3 border-t border-[#F5EFE6]/7 text-[11px] text-[#A89F91] flex justify-between font-mono">
             <span>{messages.length} exchanges</span>
-            <span>English · हिन्दी · తెలుగు</span>
+            <span>Gemini Live API · Trilingual</span>
           </div>
         </div>
       )}

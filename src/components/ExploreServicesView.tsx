@@ -14,9 +14,12 @@ import {
   Mic,
   ArrowRight,
   Compass,
-  CheckCircle2
+  CheckCircle2,
+  Volume2
 } from 'lucide-react';
 import { SupportedLanguage } from '../types';
+import { requestPageExplanation } from '../services/api';
+import { voiceEngine } from '../services/voice';
 
 interface ServiceCategoryItem {
   id: string;
@@ -31,14 +34,46 @@ interface ServiceCategoryItem {
 interface ExploreServicesViewProps {
   onStartWithPrompt: (prompt: string, lang?: SupportedLanguage) => void;
   selectedLanguage: SupportedLanguage;
+  onTriggerPageNarration?: (text: string) => void;
 }
 
 export const ExploreServicesView: React.FC<ExploreServicesViewProps> = ({
   onStartWithPrompt,
-  selectedLanguage
+  selectedLanguage,
+  onTriggerPageNarration
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCategoryFilter, setActiveCategoryFilter] = useState<string>('all');
+  const [isExplaining, setIsExplaining] = useState<boolean>(false);
+
+  const handleExplainServices = async () => {
+    setIsExplaining(true);
+    try {
+      const summary = {
+        totalCategories: 10,
+        featuredDomains: ['Education & Careers', 'Healthcare & ABHA', 'Government Schemes', 'Career & Job Prep', 'Digital & Cyber Safety', 'Everyday Life & Translations']
+      };
+      const text = await requestPageExplanation(
+        'services',
+        'Capabilities & Services Catalog',
+        JSON.stringify(summary),
+        selectedLanguage
+      );
+      if (onTriggerPageNarration) onTriggerPageNarration(text);
+      else voiceEngine.speak(text, selectedLanguage);
+    } catch (e) {
+      console.warn('Explain services error:', e);
+      const fallback = selectedLanguage === 'hi'
+        ? 'VoiceBridge AI 10 प्रमुख श्रेणियों में आपकी सहायता कर सकता है—जैसे छात्रवृत्ति, स्वास्थ्य सेवाएं, करियर तैयारी और अनुवाद।'
+        : selectedLanguage === 'te'
+        ? 'VoiceBridge AI విద్య, స్కాలర్‌షిప్‌లు, ఆరోగ్య పథకాలు మరియు అనువాదాల వంటి అనేక రంగాలలో సహాయం చేయగలదు.'
+        : 'VoiceBridge AI assists across 10 major capability domains including scholarships, healthcare schemes, career preparation, and translations.';
+      if (onTriggerPageNarration) onTriggerPageNarration(fallback);
+      else voiceEngine.speak(fallback, selectedLanguage);
+    } finally {
+      setIsExplaining(false);
+    }
+  };
 
   const categories: ServiceCategoryItem[] = [
     {
@@ -343,6 +378,17 @@ export const ExploreServicesView: React.FC<ExploreServicesViewProps> = ({
               <Mic className="w-4 h-4" />
               <span>Start Speaking: "Ask me anything"</span>
             </button>
+
+            <button
+              onClick={handleExplainServices}
+              disabled={isExplaining}
+              className="px-3.5 py-2.5 rounded-xl bg-[#141311] hover:bg-[#1A1816] border border-[#C87A4B]/40 hover:border-[#C87A4B] text-[#FAF6F0] text-xs font-medium flex items-center gap-2 transition-colors cursor-pointer"
+              title="Narrate services overview out loud"
+            >
+              <Volume2 className={`w-4 h-4 text-[#C87A4B] ${isExplaining ? 'animate-pulse' : ''}`} />
+              <span>{isExplaining ? 'Preparing Audio...' : 'Listen & Explain Services'}</span>
+            </button>
+
             <span className="text-xs text-[#A89F91]">No predefined categories required</span>
           </div>
         </div>

@@ -1,24 +1,13 @@
-import { SupportedLanguage, SUPPORTED_LANGUAGES } from '../types';
-
-// Web Speech API interfaces
-interface SpeechRecognitionErrorEvent extends Event {
-  error: string;
-  message?: string;
-}
-
-interface SpeechRecognitionEvent extends Event {
-  resultIndex: number;
-  results: SpeechRecognitionResultList;
-}
+import { SupportedLanguage, SUPPORTED_LANGUAGES, VoiceStyle } from '../types';
+import { generateServerTTS } from './api';
 
 export interface VoicePreference {
-  rate: number;
-  pitch: number;
-  selectedVoiceURI?: string;
+  style: VoiceStyle;
+  playbackSpeed: number;
 }
 
 /**
- * Normalizes text to sound natural, warm, and fluid when spoken by speech synthesizers.
+ * Normalizes text to sound natural, warm, and fluid when spoken by speech engines.
  * Strips robotic artifacts: markdown bullets, asterisks, URLs, abbreviations, and list numbers.
  */
 export function cleanTextForSpeech(rawText: string, language: SupportedLanguage): string {
@@ -56,388 +45,128 @@ export function cleanTextForSpeech(rawText: string, language: SupportedLanguage)
   text = text.replace(/daad\.(in|de)/gi, 'the DAAD portal');
   text = text.replace(/https?:\/\/[^\s]+/gi, 'the official portal');
 
-  // 6. Convert numbered lists (both multiline and inline) into natural spoken transition phrases
+  // 6. Convert numbered lists into natural spoken transition phrases
   if (language === 'hi') {
-    text = text.replace(/(?:^|[\s,;:])1[\.\)]\s+/gm, ' पहला, ');
-    text = text.replace(/(?:^|[\s,;:])2[\.\)]\s+/gm, ' दूसरा, ');
-    text = text.replace(/(?:^|[\s,;:])3[\.\)]\s+/gm, ' तीसरा, ');
-    text = text.replace(/(?:^|[\s,;:])4[\.\)]\s+/gm, ' चौथा, ');
-    text = text.replace(/(?:^|[\s,;:])5[\.\)]\s+/gm, ' पांचवां, ');
+    text = text.replace(/(?:^|\n)\s*1[\.\)]\s*/g, ' पहली बात यह है कि ');
+    text = text.replace(/(?:^|\n)\s*2[\.\)]\s*/g, ' दूसरी बात, ');
+    text = text.replace(/(?:^|\n)\s*3[\.\)]\s*/g, ' तीसरा बिंदु, ');
+    text = text.replace(/(?:^|\n)\s*4[\.\)]\s*/g, ' इसके अलावा, ');
   } else if (language === 'te') {
-    text = text.replace(/(?:^|[\s,;:])1[\.\)]\s+/gm, ' మొదటగా, ');
-    text = text.replace(/(?:^|[\s,;:])2[\.\)]\s+/gm, ' రెండవది, ');
-    text = text.replace(/(?:^|[\s,;:])3[\.\)]\s+/gm, ' మూడవది, ');
-    text = text.replace(/(?:^|[\s,;:])4[\.\)]\s+/gm, ' నాల్గవది, ');
-    text = text.replace(/(?:^|[\s,;:])5[\.\)]\s+/gm, ' ఐదవది, ');
+    text = text.replace(/(?:^|\n)\s*1[\.\)]\s*/g, ' మొదటిగా, ');
+    text = text.replace(/(?:^|\n)\s*2[\.\)]\s*/g, ' రెండవది, ');
+    text = text.replace(/(?:^|\n)\s*3[\.\)]\s*/g, ' మూడవది, ');
+    text = text.replace(/(?:^|\n)\s*4[\.\)]\s*/g, ' అలాగే, ');
   } else {
-    text = text.replace(/(?:^|[\s,;:])1[\.\)]\s+/gm, ' First, ');
-    text = text.replace(/(?:^|[\s,;:])2[\.\)]\s+/gm, ' Second, ');
-    text = text.replace(/(?:^|[\s,;:])3[\.\)]\s+/gm, ' Third, ');
-    text = text.replace(/(?:^|[\s,;:])4[\.\)]\s+/gm, ' Next, ');
-    text = text.replace(/(?:^|[\s,;:])5[\.\)]\s+/gm, ' Finally, ');
+    text = text.replace(/(?:^|\n)\s*1[\.\)]\s*/g, ' First, ');
+    text = text.replace(/(?:^|\n)\s*2[\.\)]\s*/g, ' Second, ');
+    text = text.replace(/(?:^|\n)\s*3[\.\)]\s*/g, ' Third, ');
+    text = text.replace(/(?:^|\n)\s*4[\.\)]\s*/g, ' Next, ');
   }
 
-  // 7. Remove bullet points and dashes
-  text = text.replace(/^\s*[\*\-•–]\s+/gm, 'Also, ');
+  // 7. Strip bullet points and list dashes
+  text = text.replace(/^[•\-\*]\s+/gm, ' ');
+  text = text.replace(/\s+[•\-\*]\s+/g, ', ');
 
-  // 8. Convert currency symbols and key abbreviations to natural pronunciation
-  text = text.replace(/₹\s*([0-9]+(?:\.[0-9]+)?)\s*(lakhs?|lacs?|cr|crores?|लाख|లక్షలు|లక్షల|లక్ష)?/gi, (_match, num, unit) => {
-    if (unit) {
-      if (language === 'hi' && unit.includes('लाख')) return `${num} लाख रुपये`;
-      if (language === 'te' && unit.includes('లక్ష')) return `${num} లక్షల రూపాయలు`;
-      return `${num} ${unit} rupees`;
-    }
-    if (language === 'hi') return `${num} रुपये`;
-    if (language === 'te') return `${num} రూపాయలు`;
-    return `${num} rupees`;
-  });
-  text = text.replace(/€\s*([0-9,]+)/g, '$1 euros');
-  text = text.replace(/\$/g, 'dollars ');
-  text = text.replace(/%/g, ' percent');
+  // 8. Expand abbreviations for smooth Indian English delivery
+  if (language === 'en') {
+    text = text.replace(/\bNSP\b/g, 'National Scholarship Portal');
+    text = text.replace(/\bPM-JAY\b/gi, 'P M Jay');
+    text = text.replace(/\bPMJAY\b/gi, 'P M Jay');
+    text = text.replace(/\bABHA\b/g, 'Abha');
+    text = text.replace(/\bKYC\b/gi, 'K Y C');
+    text = text.replace(/\be-KYC\b/gi, 'electronic K Y C');
+    text = text.replace(/\bDBT\b/g, 'Direct Benefit Transfer');
+    text = text.replace(/\bPFMS\b/g, 'Public Financial Management System');
+    text = text.replace(/\bAPS\b/g, 'A P S certificate');
+    text = text.replace(/\bGovt\b\.?/gi, 'Government');
+    text = text.replace(/\b₹\s*(\d+)/g, '$1 rupees');
+    text = text.replace(/\bRs\.?\s*(\d+)/gi, '$1 rupees');
+  }
 
-  // Phonetic expansions for acronyms so they are not slurred together
-  text = text.replace(/\bAPS\b/g, 'A P S');
-  text = text.replace(/\bIELTS\b/g, 'Eye-elts');
-  text = text.replace(/\bPM-JAY\b/g, 'P M Jay');
-  text = text.replace(/\bABHA\b/g, 'Abha');
-  text = text.replace(/\bCSC\b/g, 'C S C');
-  text = text.replace(/\bOTP\b/g, 'O T P');
-  text = text.replace(/\bATS\b/g, 'A T S');
-  text = text.replace(/\bCV\b/g, 'C V');
-  text = text.replace(/\bNSP\b/g, 'National Scholarship Portal');
+  // 9. Clean excessive punctuation and extra spaces
+  text = text.replace(/[:;]/g, ',');
+  text = text.replace(/\s+/g, ' ').trim();
 
-  // 9. Clean excessive spaces, hyphens, and normalize punctuation
-  text = text.replace(/[\r\n]+/g, ' ');
-  text = text.replace(/\s{2,}/g, ' ');
-  text = text.replace(/\s+([,\.\?!])/g, '$1');
-
-  return text.trim();
+  return text;
 }
 
 /**
- * Splits text into conversational thought units for natural pacing with breathing micro-pauses.
- * Leverages Intl.Segmenter to respect multilingual sentences, hindi dandas, and preserve decimal numbers.
+ * Gemini-Powered Voice Engine
+ * All audio interactions run strictly on Google Gemini (Gemini 3.8 Live API & Gemini 3.8 Flash Lite TTS).
+ * Browser-based SpeechRecognition, Web Speech API, and window.speechSynthesis have been completely eliminated.
  */
-export function splitIntoConversationalChunks(text: string, language: SupportedLanguage = 'en'): string[] {
-  if (!text) return [];
-
-  // Use Intl.Segmenter for linguistic sentence boundary detection
-  if (typeof Intl !== 'undefined' && (Intl as any).Segmenter) {
-    try {
-      const locale = language === 'hi' ? 'hi-IN' : language === 'te' ? 'te-IN' : 'en-IN';
-      const segmenter = new (Intl as any).Segmenter(locale, { granularity: 'sentence' });
-      const segments: string[] = Array.from(segmenter.segment(text))
-        .map((s: any) => s.segment.trim())
-        .filter(Boolean);
-
-      if (segments.length > 0) {
-        return segments;
-      }
-    } catch (e) {
-      // fallback to regex below
-    }
-  }
-
-  // Fallback regex: matches sentences ending with .?!। while preserving decimals (\d+\.\d+)
-  const rawSentences = text.match(/(?:[^\.!\?।]+|\d+\.\d+)+[\.!\?।]+|.+$/g) || [text];
-
-  const cleanChunks: string[] = [];
-  for (const s of rawSentences) {
-    const trimmed = s.trim();
-    if (!trimmed) continue;
-
-    // If a sentence is unusually long (> 160 chars), gently split on semicolons
-    if (trimmed.length > 160 && trimmed.includes(';')) {
-      const parts = trimmed.split(';');
-      for (const p of parts) {
-        if (p.trim()) cleanChunks.push(p.trim());
-      }
-    } else {
-      cleanChunks.push(trimmed);
-    }
-  }
-
-  return cleanChunks.length > 0 ? cleanChunks : [text];
-}
-
 export class VoiceEngine {
-  private recognition: any | null = null;
-  private synthesis: SpeechSynthesis | null = null;
   private audioContext: AudioContext | null = null;
-  private analyser: AnalyserNode | null = null;
-  private micStream: MediaStream | null = null;
-  private isListening = false;
+  private currentAudioElement: HTMLAudioElement | null = null;
   private isSpeakingActive = false;
+  private isSpeechPaused = false;
   private audioLevelCallback: ((level: number) => void) | null = null;
-  private animationFrameId: number | null = null;
   private speechSimulationInterval: any = null;
-  private currentUtteranceIndex = 0;
-  private utteranceChunks: string[] = [];
-  private activeLanguage: SupportedLanguage = 'en';
-  private pauseTimer: any = null;
 
-  // Voice settings
-  private speechRate = 0.96; // Warm, natural cadence
-  private speechPitch = 1.0;
-  private selectedVoiceURI: string | null = null;
+  // Voice settings & Audio controls
+  private voiceStyle: VoiceStyle = 'natural';
+  private playbackSpeed = 1.0;
 
   constructor() {
-    if (typeof window !== 'undefined') {
-      const SpeechRecognition =
-        (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-      if (SpeechRecognition) {
-        this.recognition = new SpeechRecognition();
-        this.recognition.continuous = true;
-        this.recognition.interimResults = true;
-      }
-      if ('speechSynthesis' in window) {
-        this.synthesis = window.speechSynthesis;
-        // Pre-warm voices
-        this.synthesis.getVoices();
-        if (this.synthesis.onvoiceschanged !== undefined) {
-          this.synthesis.onvoiceschanged = () => {
-            this.synthesis?.getVoices();
-          };
-        }
-      }
-    }
-  }
-
-  public isSpeechSupported(): boolean {
-    return Boolean(this.recognition);
-  }
-
-  public isSynthesisSupported(): boolean {
-    return Boolean(this.synthesis);
+    // Native browser speech synthesis and recognition are completely removed.
   }
 
   public isSpeaking(): boolean {
     return this.isSpeakingActive;
   }
 
+  public isPaused(): boolean {
+    return this.isSpeechPaused;
+  }
+
   public setAudioLevelCallback(cb: ((level: number) => void) | null) {
     this.audioLevelCallback = cb;
   }
 
-  public setSpeechSettings(rate: number = 0.96, pitch: number = 1.0, voiceURI?: string) {
-    this.speechRate = Math.max(0.75, Math.min(1.25, rate));
-    this.speechPitch = Math.max(0.85, Math.min(1.2, pitch));
-    if (voiceURI) this.selectedVoiceURI = voiceURI;
+  public setVoiceStyle(style: VoiceStyle) {
+    this.voiceStyle = style;
   }
 
-  /**
-   * Discovers and ranks voices for the target language, preferring Neural, Natural, and Google voices.
-   */
-  public getVoicesForLanguage(language: SupportedLanguage): SpeechSynthesisVoice[] {
-    if (!this.synthesis) return [];
-    const allVoices = this.synthesis.getVoices();
+  public getVoiceStyle(): VoiceStyle {
+    return this.voiceStyle;
+  }
 
-    const langConfig = SUPPORTED_LANGUAGES.find(l => l.code === language);
-    const targetLocale = langConfig ? langConfig.speechLocale.toLowerCase() : 'en-in';
+  public setPlaybackSpeed(speed: number) {
+    this.playbackSpeed = Math.max(0.7, Math.min(1.5, speed));
+    if (this.currentAudioElement) {
+      this.currentAudioElement.playbackRate = this.playbackSpeed;
+    }
+  }
 
-    // Filter matching voices
-    const matching = allVoices.filter(v => {
-      const vLang = v.lang.toLowerCase();
-      const vName = v.name.toLowerCase();
+  public getPlaybackSpeed(): number {
+    return this.playbackSpeed;
+  }
 
-      if (language === 'hi') {
-        return vLang.startsWith('hi') || vName.includes('hindi') || vName.includes('हिन्दी');
-      } else if (language === 'te') {
-        return vLang.startsWith('te') || vName.includes('telugu') || vName.includes('తెలుగు');
-      } else {
-        return vLang.startsWith('en');
-      }
-    });
-
-    // Score voice naturalness (prefer high-clarity neural/natural voices)
-    const scoreVoice = (v: SpeechSynthesisVoice): number => {
-      let score = 0;
-      const name = v.name.toLowerCase();
-      const lang = v.lang.toLowerCase();
-
-      if (name.includes('natural')) score += 50;
-      if (name.includes('neural')) score += 45;
-      if (name.includes('online')) score += 40;
-      if (name.includes('google')) score += 35;
-      if (name.includes('premium') || name.includes('enhanced')) score += 30;
-
-      // Indian accent preference for English in VoiceBridge context
-      if (language === 'en') {
-        if (lang === 'en-in') score += 25;
-        if (name.includes('india') || name.includes('neerja') || name.includes('prabhat')) score += 20;
-        if (lang === 'en-us' || lang === 'en-gb') score += 10;
-      }
-
-      // Avoid known robotic legacy voices if newer ones exist
-      if (name.includes('desktop') || name.includes('espeak')) score -= 20;
-
-      return score;
+  public getSettings(): { style: VoiceStyle; speed: number; rate: number; pitch: number } {
+    return {
+      style: this.voiceStyle,
+      speed: this.playbackSpeed,
+      rate: 1.0,
+      pitch: 1.0
     };
-
-    return matching.sort((a, b) => scoreVoice(b) - scoreVoice(a));
   }
 
-  public getBestVoice(language: SupportedLanguage): SpeechSynthesisVoice | null {
-    if (!this.synthesis) return null;
-    const voices = this.getVoicesForLanguage(language);
-
-    if (this.selectedVoiceURI) {
-      const explicit = voices.find(v => v.voiceURI === this.selectedVoiceURI);
-      if (explicit) return explicit;
-    }
-
-    if (voices.length > 0) return voices[0];
-
-    // Fallback: any voice on system
-    const all = this.synthesis.getVoices();
-    return all.find(v => v.lang.startsWith(language)) || all[0] || null;
-  }
-
-  public async startListening(
-    language: SupportedLanguage,
-    onResult: (transcript: string, isFinal: boolean) => void,
-    onError: (err: string) => void,
-    onStart?: () => void
-  ) {
-    if (!this.recognition) {
-      onError('Speech recognition is not supported in this browser. Please use Chrome, Edge, or Safari.');
-      return;
-    }
-
-    // If currently speaking, immediately interrupt
-    if (this.isSpeakingActive) {
-      this.cancelSpeech();
-    }
-
-    if (this.isListening) {
-      this.stopListening();
-    }
-
-    const langConfig = SUPPORTED_LANGUAGES.find(l => l.code === language);
-    this.recognition.lang = langConfig ? langConfig.speechLocale : 'en-IN';
-
-    // Start AudioContext for microphone level visualization
-    try {
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        this.micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-        this.analyser = this.audioContext.createAnalyser();
-        this.analyser.fftSize = 256;
-        const source = this.audioContext.createMediaStreamSource(this.micStream);
-        source.connect(this.analyser);
-        this.startLevelLoop();
-      }
-    } catch (micErr) {
-      console.warn('Microphone audio context visualization access limited:', micErr);
-    }
-
-    this.recognition.onstart = () => {
-      this.isListening = true;
-      if (onStart) onStart();
-    };
-
-    this.recognition.onresult = (event: SpeechRecognitionEvent) => {
-      let interimTranscript = '';
-      let finalTranscript = '';
-
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
-        const transcriptPart = event.results[i][0].transcript;
-        if (event.results[i].isFinal) {
-          finalTranscript += transcriptPart;
-        } else {
-          interimTranscript += transcriptPart;
-        }
-      }
-
-      if (finalTranscript) {
-        onResult(finalTranscript.trim(), true);
-      } else if (interimTranscript) {
-        onResult(interimTranscript.trim(), false);
-      }
-    };
-
-    this.recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-      if (event.error === 'no-speech') {
-        // Quiet silence timeout, natural in conversational pauses
-        return;
-      }
-      console.warn('Speech recognition notice:', event.error);
-      onError(event.error);
-    };
-
-    this.recognition.onend = () => {
-      this.isListening = false;
-      this.stopLevelLoop();
-    };
-
-    try {
-      this.recognition.start();
-    } catch (err: any) {
-      console.warn('Recognition start caught error:', err);
-      this.isListening = false;
+  public pauseSpeech() {
+    if (this.currentAudioElement && !this.currentAudioElement.paused) {
+      this.currentAudioElement.pause();
+      this.isSpeechPaused = true;
+      this.stopSpeechSimulation();
     }
   }
 
-  public stopListening() {
-    if (this.recognition && this.isListening) {
-      try {
-        this.recognition.stop();
-      } catch (e) {
-        // ignore already stopped
-      }
-    }
-    this.isListening = false;
-    this.stopLevelLoop();
-  }
-
-  private startLevelLoop() {
-    if (!this.analyser) return;
-    const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
-
-    const updateLevel = () => {
-      if (!this.analyser || !this.isListening) return;
-      this.analyser.getByteFrequencyData(dataArray);
-      let sum = 0;
-      for (let i = 0; i < dataArray.length; i++) {
-        sum += dataArray[i];
-      }
-      const average = sum / dataArray.length;
-      const normalized = Math.min(1, Math.max(0, average / 128));
-      if (this.audioLevelCallback) {
-        this.audioLevelCallback(normalized);
-      }
-      this.animationFrameId = requestAnimationFrame(updateLevel);
-    };
-
-    updateLevel();
-  }
-
-  private stopLevelLoop() {
-    if (this.animationFrameId) {
-      cancelAnimationFrame(this.animationFrameId);
-      this.animationFrameId = null;
-    }
-    if (this.micStream) {
-      this.micStream.getTracks().forEach(track => track.stop());
-      this.micStream = null;
-    }
-    if (this.audioContext && this.audioContext.state !== 'closed') {
-      try {
-        this.audioContext.close();
-      } catch (e) {
-        // ignore
-      }
-      this.audioContext = null;
-    }
-    if (!this.isSpeakingActive && this.audioLevelCallback) {
-      this.audioLevelCallback(0);
+  public resumeSpeech() {
+    if (this.currentAudioElement && this.currentAudioElement.paused) {
+      this.currentAudioElement.play().catch(() => {});
+      this.isSpeechPaused = false;
+      this.startSpeechSimulation();
     }
   }
 
-  /**
-   * Simulates organic voice wave level during assistant speech so the VoiceOrb ripples
-   * warmly in sync with spoken syllables.
-   */
   private startSpeechSimulation() {
     this.stopSpeechSimulation();
     let step = 0;
@@ -448,7 +177,6 @@ export class VoiceEngine {
         return;
       }
       step += 0.25;
-      // Organic speech wave combining multiple frequencies
       const wave =
         Math.sin(step) * 0.25 +
         Math.sin(step * 2.3) * 0.2 +
@@ -466,147 +194,143 @@ export class VoiceEngine {
       clearInterval(this.speechSimulationInterval);
       this.speechSimulationInterval = null;
     }
-    if (!this.isListening && this.audioLevelCallback) {
+    if (this.audioLevelCallback) {
       this.audioLevelCallback(0);
     }
   }
 
   /**
-   * High-quality, natural conversational speech playback.
-   * Pre-processes text into clean conversational speech, chunks sentences, and introduces
-   * human-like breathing micro-pauses with varied intonation.
+   * Speaks text using Gemini high-fidelity server TTS (gemini-3.8-flash-lite-tts).
+   * Generates authentic WAV audio and plays back via WebAudio / HTMLAudio.
    */
-  public speak(
+  public async speak(
     rawText: string,
     language: SupportedLanguage,
     onStart?: () => void,
     onEnd?: () => void,
     onError?: (err: any) => void
   ) {
-    if (!this.synthesis) {
-      if (onError) onError('Speech synthesis not supported');
-      return;
-    }
-
-    // Cancel ongoing speech or scheduled timers
     this.cancelSpeech();
 
-    // Clean and split text into natural conversational chunks
     const cleaned = cleanTextForSpeech(rawText, language);
     if (!cleaned) {
       if (onEnd) onEnd();
       return;
     }
 
-    this.utteranceChunks = splitIntoConversationalChunks(cleaned);
-    this.currentUtteranceIndex = 0;
-    this.activeLanguage = language;
     this.isSpeakingActive = true;
+    this.isSpeechPaused = false;
 
-    const bestVoice = this.getBestVoice(language);
-    const langConfig = SUPPORTED_LANGUAGES.find(l => l.code === language);
-    const targetLocale = langConfig ? langConfig.speechLocale : 'en-IN';
+    try {
+      const result = await generateServerTTS(cleaned, language, this.voiceStyle);
 
-    let started = false;
-
-    const playNextChunk = () => {
       if (!this.isSpeakingActive) return;
 
-      if (this.currentUtteranceIndex >= this.utteranceChunks.length) {
+      if (!result.success || !result.audioBase64) {
+        throw new Error('Gemini TTS generation did not return audio data.');
+      }
+
+      const mimeType = result.mimeType || 'audio/wav';
+      const audioUrl = `data:${mimeType};base64,${result.audioBase64}`;
+      const audio = new Audio(audioUrl);
+      this.currentAudioElement = audio;
+      audio.playbackRate = this.playbackSpeed;
+
+      audio.onplay = () => {
+        this.startSpeechSimulation();
+        if (onStart) onStart();
+      };
+
+      audio.onended = () => {
         this.isSpeakingActive = false;
         this.stopSpeechSimulation();
+        this.currentAudioElement = null;
         if (onEnd) onEnd();
-        return;
-      }
-
-      const chunkText = this.utteranceChunks[this.currentUtteranceIndex];
-      const utterance = new SpeechSynthesisUtterance(chunkText);
-
-      utterance.lang = targetLocale;
-      if (bestVoice) {
-        utterance.voice = bestVoice;
-      }
-
-      // Warm conversational pacing
-      utterance.rate = this.speechRate;
-
-      // Slight natural intonation: lift pitch on questions, warm steady pitch on statements
-      const isQuestion = chunkText.trim().endsWith('?');
-      utterance.pitch = isQuestion ? this.speechPitch + 0.04 : this.speechPitch;
-
-      utterance.onstart = () => {
-        if (!started) {
-          started = true;
-          this.startSpeechSimulation();
-          if (onStart) onStart();
-        }
       };
 
-      utterance.onend = () => {
-        this.currentUtteranceIndex++;
-        if (!this.isSpeakingActive) return;
-
-        // Introduce a subtle human breathing pause between sentences
-        // Longer pause (180ms) after a question to let the user absorb the thought
-        const microPauseMs = isQuestion ? 190 : 120;
-
-        // Temporarily lower visualizer wave to reflect breath pause
-        if (this.audioLevelCallback) {
-          this.audioLevelCallback(0.08);
-        }
-
-        this.pauseTimer = setTimeout(() => {
-          playNextChunk();
-        }, microPauseMs);
-      };
-
-      utterance.onerror = (e) => {
-        // Interrupted is normal when user cancels or speaks
-        if (e.error !== 'interrupted' && e.error !== 'canceled') {
-          console.warn('Speech chunk error:', e.error);
-        }
-        this.currentUtteranceIndex++;
-        if (this.currentUtteranceIndex < this.utteranceChunks.length && this.isSpeakingActive) {
-          playNextChunk();
-        } else {
-          this.isSpeakingActive = false;
-          this.stopSpeechSimulation();
-          if (onError && e.error !== 'interrupted') onError(e);
-          if (onEnd) onEnd();
-        }
-      };
-
-      try {
-        this.synthesis!.speak(utterance);
-      } catch (err) {
-        console.warn('Synthesis speak caught error:', err);
+      audio.onerror = (e) => {
+        console.warn('Gemini audio playback error:', e);
         this.isSpeakingActive = false;
         this.stopSpeechSimulation();
-        if (onError) onError(err);
+        this.currentAudioElement = null;
+        if (onError) onError(e);
         if (onEnd) onEnd();
-      }
-    };
+      };
 
-    playNextChunk();
+      await audio.play();
+    } catch (err: any) {
+      console.warn('Gemini voice generation notice:', err?.message || err);
+      this.isSpeakingActive = false;
+      this.stopSpeechSimulation();
+      this.currentAudioElement = null;
+      if (onError) onError(err);
+      if (onEnd) onEnd();
+    }
   }
 
   /**
-   * Instantly stops speech synthesis, clears chunk queue, and halts audio simulation.
+   * Instantly stops all Gemini spoken audio playback and halts visualizer wave.
    */
   public cancelSpeech() {
     this.isSpeakingActive = false;
-    if (this.pauseTimer) {
-      clearTimeout(this.pauseTimer);
-      this.pauseTimer = null;
-    }
+    this.isSpeechPaused = false;
     this.stopSpeechSimulation();
-    if (this.synthesis) {
+
+    if (this.currentAudioElement) {
       try {
-        this.synthesis.cancel();
+        this.currentAudioElement.pause();
+        this.currentAudioElement.currentTime = 0;
+        this.currentAudioElement.src = '';
       } catch (e) {
         // ignore
       }
+      this.currentAudioElement = null;
     }
+  }
+
+  /**
+   * Preview persona delivery via Gemini server-side speech.
+   */
+  public previewVoice(
+    style: VoiceStyle,
+    speedOrLang: number | SupportedLanguage = 1.0,
+    langOrOnStart: SupportedLanguage | (() => void) = 'en',
+    onStartOrEnd?: () => void,
+    onEndCb?: () => void,
+    onErrorCb?: () => void
+  ) {
+    this.setVoiceStyle(style);
+    let speed = 1.0;
+    let language: SupportedLanguage = 'en';
+    let onStart: (() => void) | undefined;
+    let onEnd: (() => void) | undefined;
+    let onError: (() => void) | undefined;
+
+    if (typeof speedOrLang === 'number') {
+      speed = speedOrLang;
+      this.setPlaybackSpeed(speed);
+      if (typeof langOrOnStart === 'string') {
+        language = langOrOnStart as SupportedLanguage;
+      }
+      onStart = onStartOrEnd;
+      onEnd = onEndCb;
+      onError = onErrorCb;
+    } else {
+      language = speedOrLang as SupportedLanguage;
+      if (typeof langOrOnStart === 'function') {
+        onEnd = langOrOnStart;
+      }
+    }
+
+    let sample = '';
+    if (language === 'hi') {
+      sample = 'नमस्ते! मैं वॉयसब्रिज एआई हूँ। मैं जेमिनी 3.8 लाइव एपीआई के माध्यम से आपकी सहायता करने के लिए तैयार हूँ।';
+    } else if (language === 'te') {
+      sample = 'నమస్కారం! నేను వాయిస్‌బ్రిడ్జ్ ఏఐ. జెమిని 3.8 లైవ్ ఏపీఐ ద్వారా మీకు సహాయం చేయడానికి సిద్ధంగా ఉన్నాను.';
+    } else {
+      sample = 'Hello, I am VoiceBridge AI. Operating exclusively on Gemini 3.8 Live API for real-time conversational assistance.';
+    }
+    this.speak(sample, language, onStart, onEnd, onError);
   }
 }
 

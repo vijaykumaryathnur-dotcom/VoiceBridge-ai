@@ -85,7 +85,8 @@ export async function sendGeminiChat(
   systemInstruction?: string,
   useSearchGrounding: boolean = false,
   language: SupportedLanguage = 'en',
-  workflowId?: string
+  workflowId?: string,
+  pageContext?: { page: string; title: string; dataSummary?: any }
 ): Promise<GeminiChatResponse> {
   try {
     const res = await fetch('/api/gemini/chat', {
@@ -97,7 +98,8 @@ export async function sendGeminiChat(
         systemInstruction,
         useSearchGrounding,
         language,
-        workflowId
+        workflowId,
+        pageContext
       })
     });
 
@@ -117,8 +119,9 @@ export async function sendVoiceMessage(
   message: string,
   language: SupportedLanguage,
   workflowId?: string,
-  history: Array<{ sender: string; text: string }> = []
-): Promise<{ reply: string; source: string }> {
+  history: Array<{ sender: string; text: string }> = [],
+  pageContext?: { page: string; title: string; dataSummary?: any }
+): Promise<{ reply: string; source: string; sources?: GroundingSource[] }> {
   try {
     const formattedHistory = history.map(h => ({
       role: (h.sender === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
@@ -132,12 +135,14 @@ export async function sendVoiceMessage(
       undefined,
       true, // use search grounding
       language,
-      workflowId
+      workflowId,
+      pageContext
     );
 
     return {
       reply: chatRes.reply,
-      source: chatRes.model
+      source: chatRes.model,
+      sources: chatRes.sources
     };
   } catch (err: any) {
     console.warn('sendVoiceMessage fallback triggered:', err);
@@ -149,6 +154,81 @@ export async function sendVoiceMessage(
         : 'Hello! I am VoiceBridge AI. I can guide you through scholarships, Ayushman Bharat, and public service paperwork.',
       source: 'local_fallback'
     };
+  }
+}
+
+// Contextual "Listen and Explain" Narration
+export async function requestPageExplanation(
+  page: string,
+  arg2?: SupportedLanguage | string,
+  arg3?: Record<string, any> | string,
+  arg4?: string | SupportedLanguage
+): Promise<string> {
+  let language: SupportedLanguage = 'en';
+  let dataSummary: Record<string, any> = {};
+  let style: string = 'natural';
+
+  if (arg2 === 'en' || arg2 === 'hi' || arg2 === 'te') {
+    language = arg2;
+    if (typeof arg3 === 'object' && arg3 !== null) {
+      dataSummary = arg3;
+    } else if (typeof arg3 === 'string') {
+      try { dataSummary = JSON.parse(arg3); } catch { dataSummary = { info: arg3 }; }
+    }
+    if (typeof arg4 === 'string') style = arg4;
+  } else {
+    if (arg4 === 'en' || arg4 === 'hi' || arg4 === 'te') {
+      language = arg4 as SupportedLanguage;
+    }
+    if (typeof arg3 === 'object' && arg3 !== null) {
+      dataSummary = arg3;
+    } else if (typeof arg3 === 'string') {
+      try { dataSummary = JSON.parse(arg3); } catch { dataSummary = { info: arg3 }; }
+    }
+  }
+
+  try {
+    const res = await fetch('/api/explain-page', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ page, language, dataSummary, style })
+    });
+    if (!res.ok) throw new Error('Page explanation failed');
+    const data = await res.json();
+    return data.text || '';
+  } catch (err) {
+    console.warn('requestPageExplanation error:', err);
+    if (page === 'documents') {
+      return language === 'hi'
+        ? 'मैंने आपकी दस्तावेज़ सूची की जाँच की है। आपका आधार कार्ड पहले से सत्यापित है, लेकिन आय प्रमाण पत्र और अंकतालिका अभी लंबित हैं।'
+        : language === 'te'
+        ? 'నేను మీ ధ్రువపత్రాల జాబితాను పరిశీలించాను. మీ ఆధార్ కార్డు ఇప్పటికే సమర్పించబడింది, అయితే ఆదాయ ధ్రువీకరణ మరియు మార్కుల పత్రం ఇంకా అవసరం.'
+        : 'I have checked your document checklist. Your Aadhaar card is already submitted and linked, while your family income certificate is still needed for verification.';
+    }
+    return language === 'hi'
+      ? 'नागरिक पोर्टल पर आपका स्वागत है। आपके सक्रिय कल्याणकारी आवेदन चल रहे हैं।'
+      : language === 'te'
+      ? 'సిటిజెన్ పోర్టల్‌కు స్వాగతం. మీ వద్ద చురుకైన దరఖాస్తులు ఉన్నాయి.'
+      : 'Welcome to VoiceBridge AI. I can guide you through everything on this screen.';
+  }
+}
+
+// Server-side High-Fidelity Text-to-Speech
+export async function generateServerTTS(
+  text: string,
+  language: SupportedLanguage,
+  style: string = 'natural'
+): Promise<{ success: boolean; audioBase64?: string; mimeType?: string }> {
+  try {
+    const res = await fetch('/api/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, language, style })
+    });
+    if (!res.ok) return { success: false };
+    return await res.json();
+  } catch (err) {
+    return { success: false };
   }
 }
 
@@ -185,14 +265,48 @@ export class GeminiLiveSession {
   private processor: ScriptProcessorNode | null = null;
   private nextStartTime: number = 0;
   private isConnected: boolean = false;
+  private activeSources: AudioBufferSourceNode[] = [];
+
+  public language: SupportedLanguage = 'en';
+  public voiceName: string = 'Aoede';
+  public page: string = 'assistant';
+  public topic: string = '';
 
   public onStatusChange?: (status: 'connecting' | 'connected' | 'error' | 'disconnected', error?: string) => void;
-  public onAudioActivity?: (level: number) => void;
+  public onAudioActivity?: (level: number, source: 'mic' | 'model') => void;
+  public onInputTranscript?: (text: string) => void;
+  public onOutputTranscript?: (text: string) => void;
+  public onInterrupted?: () => void;
+  public onTurnComplete?: () => void;
 
-  public async start() {
+  constructor(language: SupportedLanguage = 'en', voiceName: string = 'Aoede', page: string = 'assistant', topic: string = '') {
+    this.language = language;
+    this.voiceName = voiceName;
+    this.page = page;
+    this.topic = topic;
+  }
+
+  public isLiveConnected(): boolean {
+    return this.isConnected && Boolean(this.ws && this.ws.readyState === WebSocket.OPEN);
+  }
+
+  public async start(language?: SupportedLanguage, voiceName?: string, page?: string, topic?: string) {
+    if (language) this.language = language;
+    if (voiceName) this.voiceName = voiceName;
+    if (page) this.page = page;
+    if (topic !== undefined) this.topic = topic;
+
+    this.stop();
     this.onStatusChange?.('connecting');
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/api/live`;
+    const params = new URLSearchParams({
+      lang: this.language,
+      voice: this.voiceName,
+      page: this.page,
+      topic: this.topic
+    });
+    const wsUrl = `${protocol}//${window.location.host}/api/live?${params.toString()}`;
 
     this.ws = new WebSocket(wsUrl);
 
@@ -208,32 +322,47 @@ export class GeminiLiveSession {
         if (msg.error) {
           this.onStatusChange?.('error', msg.error);
         } else if (msg.audio) {
-          // Play 24kHz PCM from gemini-3.8-live
+          // Play 24kHz PCM chunk from gemini-3.8-live
           this.playPcm24k(msg.audio);
+        } else if (msg.inputTranscript) {
+          this.onInputTranscript?.(msg.inputTranscript);
+        } else if (msg.outputTranscript) {
+          this.onOutputTranscript?.(msg.outputTranscript);
         } else if (msg.interrupted) {
-          // Model interrupted, reset playback queue
-          this.nextStartTime = this.outputAudioCtx?.currentTime || 0;
+          this.stopAllAudioPlayback();
+          this.onInterrupted?.();
+        } else if (msg.turnComplete) {
+          this.onTurnComplete?.();
         }
       } catch (err) {
-        console.warn('WS onmessage parse error:', err);
+        console.warn('Live API WebSocket parse error:', err);
       }
     };
 
     this.ws.onerror = (e) => {
-      console.warn('Live API WebSocket error:', e);
-      this.onStatusChange?.('error', 'WebSocket connection failed.');
+      console.warn('Gemini Live API WebSocket connection error:', e);
+      this.onStatusChange?.('error', 'Live API connection error. Please verify server status.');
     };
 
     this.ws.onclose = () => {
       this.isConnected = false;
+      this.stopAllAudioPlayback();
       this.onStatusChange?.('disconnected');
-      this.stop();
     };
   }
 
   private async initMicStream() {
     try {
-      this.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      this.micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+
       this.inputAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       this.outputAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       this.nextStartTime = this.outputAudioCtx.currentTime;
@@ -248,15 +377,21 @@ export class GeminiLiveSession {
         if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
         const channelData = e.inputBuffer.getChannelData(0);
 
-        // Calculate volume for UI activity
+        // Compute mic activity level for live visual orb
         let sum = 0;
         for (let i = 0; i < channelData.length; i++) {
           sum += Math.abs(channelData[i]);
         }
-        const level = Math.min(1, (sum / channelData.length) * 5);
-        this.onAudioActivity?.(level);
+        const level = Math.min(1, (sum / channelData.length) * 5.5);
+        this.onAudioActivity?.(level, 'mic');
 
-        // Convert Float32 to 16-bit PCM little-endian
+        // Automatic user speech barge-in: If user starts speaking while model audio is playing, interrupt model
+        if (level > 0.12 && this.activeSources.length > 0) {
+          this.stopAllAudioPlayback();
+          this.onInterrupted?.();
+        }
+
+        // Convert Float32 to 16-bit PCM little-endian for Gemini Live API
         const pcm16 = new Int16Array(channelData.length);
         for (let i = 0; i < channelData.length; i++) {
           const s = Math.max(-1, Math.min(1, channelData[i]));
@@ -267,8 +402,8 @@ export class GeminiLiveSession {
         this.ws.send(JSON.stringify({ audio: base64 }));
       };
     } catch (err: any) {
-      console.error('Failed to init mic for Live API:', err);
-      this.onStatusChange?.('error', err.message || 'Microphone access denied');
+      console.error('Failed to init microphone for Gemini Live API:', err);
+      this.onStatusChange?.('error', err.message || 'Microphone access denied or unavailable.');
     }
   }
 
@@ -276,6 +411,10 @@ export class GeminiLiveSession {
     if (!this.outputAudioCtx) {
       this.outputAudioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       this.nextStartTime = this.outputAudioCtx.currentTime;
+    }
+
+    if (this.outputAudioCtx.state === 'suspended') {
+      this.outputAudioCtx.resume().catch(() => {});
     }
 
     const binary = atob(base64Data);
@@ -286,9 +425,16 @@ export class GeminiLiveSession {
     }
     const int16 = new Int16Array(bytes.buffer);
     const float32 = new Float32Array(int16.length);
+
+    let sum = 0;
     for (let i = 0; i < int16.length; i++) {
       float32[i] = int16[i] / 32768.0;
+      sum += Math.abs(float32[i]);
     }
+
+    // Audio activity from model output
+    const modelLevel = Math.min(1, (sum / float32.length) * 4.5);
+    this.onAudioActivity?.(modelLevel, 'model');
 
     const audioBuffer = this.outputAudioCtx.createBuffer(1, float32.length, 24000);
     audioBuffer.getChannelData(0).set(float32);
@@ -301,6 +447,46 @@ export class GeminiLiveSession {
     const startTime = Math.max(currentTime, this.nextStartTime);
     source.start(startTime);
     this.nextStartTime = startTime + audioBuffer.duration;
+
+    this.activeSources.push(source);
+    source.onended = () => {
+      const idx = this.activeSources.indexOf(source);
+      if (idx !== -1) this.activeSources.splice(idx, 1);
+    };
+  }
+
+  public stopAllAudioPlayback() {
+    for (const src of this.activeSources) {
+      try {
+        src.stop();
+        src.disconnect();
+      } catch (e) {
+        // ignore
+      }
+    }
+    this.activeSources = [];
+    if (this.outputAudioCtx) {
+      this.nextStartTime = this.outputAudioCtx.currentTime;
+    }
+  }
+
+  public interrupt() {
+    this.stopAllAudioPlayback();
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify({ interrupt: true }));
+      } catch (e) {
+        // ignore
+      }
+    }
+    this.onInterrupted?.();
+  }
+
+  public sendText(text: string) {
+    if (!text.trim()) return;
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ text }));
+    }
   }
 
   private arrayBufferToBase64(buffer: ArrayBuffer): string {
@@ -315,6 +501,8 @@ export class GeminiLiveSession {
 
   public stop() {
     this.isConnected = false;
+    this.stopAllAudioPlayback();
+
     if (this.processor) {
       this.processor.disconnect();
       this.processor = null;

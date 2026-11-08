@@ -11,28 +11,38 @@ import {
   Play,
   Sparkles,
   ChevronRight,
-  ArrowRight
+  ArrowRight,
+  Volume2,
+  FolderOpen
 } from 'lucide-react';
 import { WorkflowItem, ConversationSession, SupportedLanguage, SUPPORTED_LANGUAGES } from '../types';
 import { voiceEngine } from '../services/voice';
+import { requestPageExplanation } from '../services/api';
 
 interface DashboardProps {
   workflows: WorkflowItem[];
   recentConversations: ConversationSession[];
+  uploadedDocumentsCount?: number;
   onStartConversation: (language: SupportedLanguage, workflowId?: string) => void;
   onOpenWorkflow: (workflowId: string) => void;
   onSelectConversation: (convo: ConversationSession) => void;
+  onTriggerPageNarration?: (text: string) => void;
+  selectedLanguage?: SupportedLanguage;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({
   workflows,
   recentConversations,
+  uploadedDocumentsCount = 0,
   onStartConversation,
   onOpenWorkflow,
-  onSelectConversation
+  onSelectConversation,
+  onTriggerPageNarration,
+  selectedLanguage: appSelectedLanguage
 }) => {
-  const [selectedLang, setSelectedLang] = useState<SupportedLanguage>('en');
+  const [selectedLang, setSelectedLang] = useState<SupportedLanguage>(appSelectedLanguage || 'en');
   const [playingAudioId, setPlayingAudioId] = useState<string | null>(null);
+  const [isExplaining, setIsExplaining] = useState<boolean>(false);
 
   const handlePlaySampleAudio = (convo: ConversationSession) => {
     if (playingAudioId === convo.id) {
@@ -73,6 +83,41 @@ export const Dashboard: React.FC<DashboardProps> = ({
       .map(d => ({ ...d, workflowTitle: wf.title, workflowId: wf.id }))
   );
 
+  const handleExplainDashboard = async () => {
+    setIsExplaining(true);
+    try {
+      const summaryData = {
+        activeApplications: workflows.length,
+        pendingDocumentsCount: pendingDocs.length,
+        uploadedDocumentsInVault: uploadedDocumentsCount,
+        recentSessionsCount: recentConversations.length,
+        workflowsList: workflows.map(w => ({ title: w.title, progress: `${w.progress}%`, status: w.status }))
+      };
+      const spokenExplanation = await requestPageExplanation(
+        'dashboard',
+        'Citizen Dashboard Overview',
+        JSON.stringify(summaryData),
+        selectedLang
+      );
+      if (onTriggerPageNarration) {
+        onTriggerPageNarration(spokenExplanation);
+      } else {
+        voiceEngine.speak(spokenExplanation, selectedLang);
+      }
+    } catch (e) {
+      console.warn('Dashboard explain error:', e);
+      const fallback = selectedLang === 'hi'
+        ? `आपके पास वर्तमान में ${workflows.length} सक्रिय आवेदन हैं और ${pendingDocs.length} दस्तावेज़ सत्यापन के लिए लंबित हैं। आप किसी भी आवेदन पर बोलकर सहायता प्राप्त कर सकते हैं।`
+        : selectedLang === 'te'
+        ? `మీ వద్ద ప్రస్తుతం ${workflows.length} క్రియాశీల దరఖాస్తులు ఉన్నాయి మరియు ${pendingDocs.length} పత్రాలు ధృవీకరణ కోసం పెండింగ్‌లో ఉన్నాయి.`
+        : `You currently have ${workflows.length} active applications and ${pendingDocs.length} pending document requirements. You can speak with me at any time to fulfill them.`;
+      if (onTriggerPageNarration) onTriggerPageNarration(fallback);
+      else voiceEngine.speak(fallback, selectedLang);
+    } finally {
+      setIsExplaining(false);
+    }
+  };
+
   return (
     <div className="max-w-5xl mx-auto w-full px-4 sm:px-6 py-6 md:py-8 space-y-9 select-none text-[#F5EFE6]">
       
@@ -101,7 +146,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
 
           {/* Quick Voice Bar with burnished copper accent */}
-          <div className="flex items-center gap-2 self-start md:self-auto">
+          <div className="flex flex-wrap items-center gap-2 self-start md:self-auto">
             <div className="flex items-center bg-[#0D0D0C] p-1 rounded-xl border border-[#F5EFE6]/6">
               {SUPPORTED_LANGUAGES.map((lang) => (
                 <button
@@ -117,6 +162,16 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 </button>
               ))}
             </div>
+
+            <button
+              onClick={handleExplainDashboard}
+              disabled={isExplaining}
+              className="px-3.5 py-2.5 text-xs font-medium text-[#FAF6F0] bg-[#1A1816] hover:bg-[#23201C] border border-[#C87A4B]/40 hover:border-[#C87A4B] rounded-xl transition-all flex items-center gap-2 cursor-pointer"
+              title="Narrate dashboard overview out loud"
+            >
+              <Volume2 className={`w-4 h-4 text-[#C87A4B] ${isExplaining ? 'animate-pulse' : ''}`} />
+              <span>{isExplaining ? 'Preparing Audio...' : 'Listen & Explain'}</span>
+            </button>
 
             <button
               onClick={() => onStartConversation(selectedLang)}
@@ -138,15 +193,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
             </p>
           </div>
           <div className="space-y-0.5">
-            <span className="text-[11px] text-[#A89F91]">Pending Documents</span>
+            <span className="text-[11px] text-[#A89F91]">Pending Document Checks</span>
             <p className="font-editorial text-2xl font-bold text-[#C87A4B] tabular-nums">
               {pendingDocs.length}
             </p>
           </div>
           <div className="space-y-0.5">
-            <span className="text-[11px] text-[#A89F91]">Verified Schemes</span>
-            <p className="font-editorial text-2xl font-bold text-[#E0A364]">
-              3 Programs
+            <span className="text-[11px] text-[#A89F91]">Documents in Vault</span>
+            <p className="font-editorial text-2xl font-bold text-[#E0A364] tabular-nums">
+              {uploadedDocumentsCount} Files
             </p>
           </div>
           <div className="space-y-0.5">

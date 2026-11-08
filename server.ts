@@ -258,6 +258,135 @@ Transcribe in the original spoken language and script (Devanagari for Hindi, Tel
   }
 });
 
+// 3b. High-Quality Gemini Text-to-Speech (gemini-3.8-flash-lite-tts)
+app.post('/api/tts', async (req, res) => {
+  const { text, language = 'en', style = 'natural' } = req.body;
+  if (!text) {
+    return res.status(400).json({ error: 'Text is required' });
+  }
+
+  let voiceName = 'Aoede';
+  if (style === 'professional') voiceName = 'Charon';
+  else if (style === 'friendly') voiceName = 'Fenrir';
+  else if (style === 'explainer') voiceName = 'Kore';
+
+  if (!aiClient) {
+    return res.json({ success: false, fallback: true, message: 'Server TTS client not ready' });
+  }
+
+  try {
+    const ttsRes = await Promise.race([
+      aiClient.models.generateContent({
+        model: 'gemini-3.8-flash-lite-tts',
+        contents: text,
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: { prebuiltVoiceConfig: { voiceName } }
+          }
+        }
+      }),
+      new Promise<any>((_, reject) => setTimeout(() => reject(new Error('TTS timeout')), 5000))
+    ]);
+
+    const part = ttsRes.candidates?.[0]?.content?.parts?.[0];
+    if (part?.inlineData?.data) {
+      return res.json({
+        success: true,
+        audioBase64: part.inlineData.data,
+        mimeType: part.inlineData.mimeType || 'audio/wav',
+        voiceName,
+        style
+      });
+    }
+    return res.json({ success: false, fallback: true });
+  } catch (err: any) {
+    return res.json({ success: false, fallback: true, error: err.message });
+  }
+});
+
+// 3c. Contextual Intelligent Page Narration ("Listen and Explain")
+app.post('/api/explain-page', async (req, res) => {
+  const { page, language = 'en', dataSummary = {}, style = 'natural' } = req.body;
+  const targetLang = language === 'te' ? 'Telugu (తెలుగు)' : language === 'hi' ? 'Hindi (हिन्दी)' : 'English';
+
+  const prompt = `You are VoiceBridge AI, a helpful, warm, and natural conversational voice assistant explaining the current screen to a citizen.
+Current Screen: ${page}
+Screen Data Details: ${JSON.stringify(dataSummary)}
+Language: ${targetLang}
+
+Rules for Spoken Page Narration:
+1. Speak as a patient human assistant sitting beside the user.
+2. In 2 to 3 natural spoken sentences, summarize what this page shows, state the important facts (e.g. number of active applications, missing documents, or upcoming deadlines), explain any technical terms in plain language, and finish with one helpful follow-up question.
+3. NEVER mechanically read table headers, IDs, or raw button labels.
+4. Absolute rule: ZERO markdown symbols, NO bullets, NO asterisks.
+5. Strictly respond in ${targetLang}.`;
+
+  if (aiClient) {
+    try {
+      const explainRes = await Promise.race([
+        aiClient.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: prompt
+        }),
+        new Promise<any>((_, reject) => setTimeout(() => reject(new Error('Explain timeout')), 5000))
+      ]);
+      const text = explainRes.text?.trim();
+      if (text) {
+        return res.json({ success: true, text });
+      }
+    } catch (e: any) {
+      console.warn('Explain page API call fallback:', e.message);
+    }
+  }
+
+  // Domain fallback for each page in all 3 languages:
+  let fallbackText = '';
+  if (page === 'documents') {
+    if (language === 'hi') {
+      fallbackText = 'मैंने आपकी दस्तावेज़ सूची की जाँच की है। आपका आधार कार्ड पहले से सत्यापित है, लेकिन आय प्रमाण पत्र और अंकतालिका अभी लंबित हैं। क्या आप जानना चाहते हैं कि तहसीलदार से नया आय प्रमाण पत्र कैसे प्राप्त करें?';
+    } else if (language === 'te') {
+      fallbackText = 'నేను మీ ధ్రువపత్రాల జాబితాను పరిశీలించాను. మీ ఆధార్ కార్డు ఇప్పటికే సమర్పించబడింది, అయితే ఆదాయ ధ్రువీకరణ మరియు మార్కుల పత్రం ఇంకా అవసరం. వీటిని ఎలా పొందాలో నేను వివరించమంటారా?';
+    } else {
+      fallbackText = 'I have reviewed your documents checklist. Your Aadhaar card is already submitted and linked, but your family income certificate is still needed for verification. Would you like me to explain how to obtain it?';
+    }
+  } else if (page === 'applications') {
+    if (language === 'hi') {
+      fallbackText = 'आपके पास वर्तमान में 3 सक्रिय आवेदन हैं, जिनमें पोस्ट-मैट्रिक छात्रवृत्ति 60 प्रतिशत पूरी हो चुकी है। क्या आप छात्रवृत्ति के लंबित चरणों की समीक्षा करना चाहते हैं?';
+    } else if (language === 'te') {
+      fallbackText = 'మీ వద్ద ప్రస్తుతం 3 చురుకైన దరఖాస్తులు ఉన్నాయి. పోస్ట్-మెట్రిక్ స్కాలర్‌షిప్ 60 శాతం పూర్తయింది. మిగిలిన దశలను పూర్తి చేయడంలో సహాయం కావాలా?';
+    } else {
+      fallbackText = 'You currently have 3 active applications in your registry, with the Post-Matric Scholarship Scheme standing at 60 percent completion. Would you like me to walk you through the remaining steps?';
+    }
+  } else if (page === 'dashboard') {
+    if (language === 'hi') {
+      fallbackText = 'नागरिक पोर्टल पर आपका स्वागत है। आपके 3 सक्रिय कल्याणकारी आवेदन चल रहे हैं और 2 आवश्यक दस्तावेज़ सत्यापन के लिए लंबित हैं। आज आप किस कार्य से शुरुआत करना चाहते हैं?';
+    } else if (language === 'te') {
+      fallbackText = 'సిటిజెన్ పోర్టల్‌కు స్వాగతం. మీ వద్ద 3 చురుకైన దరఖాస్తులు మరియు ధ్రువీకరణ కోసం 2 పెండింగ్ పత్రాలు ఉన్నాయి. ఈ రోజు దేనితో ప్రారంభించాలనుకుంటున్నారు?';
+    } else {
+      fallbackText = 'Welcome to your Citizen Workspace. You currently have 3 active welfare applications and 2 pending documents awaiting verification. Which task would you like to continue today?';
+    }
+  } else if (page === 'workflows') {
+    if (language === 'hi') {
+      fallbackText = 'यह वर्कफ़्लो निर्देशिका है, जहाँ आप छात्रवृत्ति, आयुष्मान भारत और राशन कार्ड के चरणों की चरण-दर-चरण जानकारी पा सकते हैं। क्या आप किसी विशेष योजना की पात्रता समझना चाहते हैं?';
+    } else if (language === 'te') {
+      fallbackText = 'ఇది సంక్షేమ పథకాల మార్గదర్శక కేంద్రం. స్కాలర్‌షిప్, ఆయుష్మాన్ భారత్ మరియు రేషన్ కార్డు దరఖాస్తు దశలను ఇక్కడ చూడవచ్చు. మీకు ఏ పథకం గురించి మార్గదర్శకత్వం కావాలి?';
+    } else {
+      fallbackText = 'This is your Workflows Directory with verified step-by-step pathways for education scholarships, healthcare cards, and civil records. Which pathway would you like guidance on?';
+    }
+  } else {
+    if (language === 'hi') {
+      fallbackText = 'नमस्ते! मैं वॉयसब्रिज एआई हूँ। आप इस पृष्ठ पर प्रदर्शित किसी भी जानकारी या सरकारी सेवाओं के बारे में मुझसे सीधे पूछ सकते हैं। मैं आपकी क्या सहायता करूँ?';
+    } else if (language === 'te') {
+      fallbackText = 'నమస్కారం! నేను వాయిస్‌బ్రిడ్జ్ ఏఐ. ఈ స్క్రీన్‌పై ఉన్న సమాచారం లేదా ప్రభుత్వ సేవల గురించి నాతో మాట్లాడవచ్చు. మీకు ఏ విషయంలో సహాయం కావాలి?';
+    } else {
+      fallbackText = 'Hello! I am VoiceBridge AI. You can ask me any question about the information on this screen or about essential public services. How can I assist you right now?';
+    }
+  }
+
+  return res.json({ success: true, text: fallbackText });
+});
+
 // 4. Multi-turn Chatbot with Gemini (gemini-3.8-flash, gemini-3.1-flash-lite, gemini-4-argon) + Search Grounding
 app.post('/api/gemini/chat', async (req, res) => {
   const {
@@ -266,7 +395,8 @@ app.post('/api/gemini/chat', async (req, res) => {
     systemInstruction,
     useSearchGrounding = false,
     language = 'en',
-    workflowId
+    workflowId,
+    pageContext // { page: string; title: string; dataSummary?: any }
   } = req.body;
 
   if (!messages || messages.length === 0) {
@@ -274,9 +404,6 @@ app.post('/api/gemini/chat', async (req, res) => {
   }
 
   // Model selection enforcement as requested:
-  // gemini-4-argon for particularly complex tasks
-  // gemini-3.8-flash for general tasks & Search Grounding
-  // gemini-3.1-flash-lite for tasks that should happen fast
   let selectedModel = model;
   if (!['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-4-argon'].includes(selectedModel)) {
     selectedModel = 'gemini-3.8-flash';
@@ -284,9 +411,17 @@ app.post('/api/gemini/chat', async (req, res) => {
 
   const selectedWorkflow = workflowId ? workflowsStore[workflowId] : null;
 
+  const pageContextPrompt = pageContext
+    ? `\nCURRENT PAGE CONTEXT:
+The citizen is currently viewing the '${pageContext.title || pageContext.page}' page.
+Page Data Snapshot: ${JSON.stringify(pageContext.dataSummary || {})}
+If the user asks questions referring to "this page", "missing documents", "my progress", "my applications", or "what should I do next", answer with direct, precise reference to the displayed data above.`
+    : '';
+
   const defaultRoleInstruction = systemInstruction || `You are VoiceBridge AI, a warm, natural, voice-first multilingual conversational AI assistant.
 Current User Language: ${language === 'te' ? 'Telugu (తెలుగు)' : language === 'hi' ? 'Hindi (हिन्दी)' : 'English'}.
 Strictly respond in the user's selected language (${language === 'te' ? 'natural, conversational Telugu script' : language === 'hi' ? 'natural, conversational Hindi Devanagari script' : 'natural, conversational English'}).
+${pageContextPrompt}
 
 VOICE-FIRST CONVERSATIONAL PERSONALITY:
 - You are speaking aloud directly to a person sitting beside you. Write strictly for the ear, never for reading.
@@ -391,7 +526,28 @@ ${selectedWorkflow ? `Current Context Focus: ${selectedWorkflow.title} (${select
       { title: 'ABHA Health ID Portal', uri: 'https://abha.abdm.gov.in' }
     ];
 
-    if (language === 'hi') {
+    // Contextual Page-Aware Fallback
+    if (pageContext && (lastUserMsg.includes('missing') || lastUserMsg.includes('document') || lastUserMsg.includes('pending') || lastUserMsg.includes('progress') || lastUserMsg.includes('status') || lastUserMsg.includes('what') || lastUserMsg.includes('which'))) {
+      if (pageContext.page === 'documents') {
+        if (language === 'hi') {
+          domainReply = 'आपकी वर्तमान दस्तावेज़ सूची के अनुसार, आपका आय प्रमाण पत्र और अंकतालिका अभी सत्यापन के लिए लंबित हैं, जबकि आधार कार्ड पहले से लिंक है। क्या आप जानना चाहते हैं कि आय प्रमाण पत्र कैसे प्राप्त करें?';
+        } else if (language === 'te') {
+          domainReply = 'మీ ధ్రువపత్రాల జాబితా ప్రకారం, ఆదాయ ధ్రువీకరణ మరియు మునుపటి మార్కుల పత్రం ఇంకా అవసరం. మీ ఆధార్ కార్డు ఇప్పటికే ధ్రువీకరించబడింది. వీటిని ఎలా పొందాలో నేను వివరించమంటారా?';
+        } else {
+          domainReply = 'According to your current documents checklist, your family income certificate and previous marksheet are still pending verification, while your Aadhaar card is already submitted and linked. Would you like me to guide you on how to arrange the income certificate?';
+        }
+      } else if (pageContext.page === 'applications') {
+        if (language === 'hi') {
+          domainReply = 'आपके आवेदनों में पोस्ट-मैट्रिक छात्रवृत्ति 60 प्रतिशत पूरी हो चुकी है और सत्यापन प्रक्रिया में है। क्या आप इसके लंबित चरणों की समीक्षा करना चाहते हैं?';
+        } else if (language === 'te') {
+          domainReply = 'మీ దరఖాస్తులలో పోస్ట్-మెట్రిక్ స్కాలర్‌షిప్ 60 శాతం పూర్తితో సమీక్షలో ఉంది. మిగిలిన దశలను పూర్తి చేయడంలో సహాయం కావాలా?';
+        } else {
+          domainReply = 'Looking at your applications, your Post-Matric Scholarship is at 60 percent progress under active verification. Would you like guidance on the remaining pending steps?';
+        }
+      }
+    }
+
+    if (!domainReply && language === 'hi') {
       if (lastUserMsg.includes('germany') || lastUserMsg.includes('जर्मनी')) {
         domainReply = 'जर्मनी में पढ़ाई करने के लिए सबसे पहले आपको एपीएस प्रमाण पत्र और आईईएलटीएस या जर्मन भाषा की परीक्षा पास करनी होगी। इसके बाद यूनी-असिस्ट पोर्टल के ज़रिए विश्वविद्यालयों में आवेदन किया जाता है, और वीज़ा के लिए लगभग 11,900 यूरो का ब्लॉक्ड खाता चाहिए होता है। क्या आप वहां मास्टर्स डिग्री के लिए जाना चाहते हैं या बैचलर्स के लिए?';
         sources.push({ title: 'DAAD India - Study in Germany', uri: 'https://www.daad.in' });
@@ -498,12 +654,23 @@ app.post('/api/workflows/:id/document-toggle', (req, res) => {
 });
 
 // ==========================================
-// WEBSOCKET: GEMINI 3.8 LIVE API BRIDGE
+// WEBSOCKET: GEMINI 3.8 LIVE API EXCLUSIVE BRIDGE
 // ==========================================
 const wss = new WebSocketServer({ noServer: true });
 
-wss.on('connection', async (clientWs: WebSocket) => {
-  console.log('Gemini Live API client connected');
+const VALID_LIVE_VOICES = ['Aoede', 'Charon', 'Fenrir', 'Kore', 'Puck', 'Zephyr'];
+
+wss.on('connection', async (clientWs: WebSocket, request: any) => {
+  const reqUrl = new URL(request?.url || '', 'http://localhost');
+  const language = reqUrl.searchParams.get('lang') || 'en';
+  const voiceParam = reqUrl.searchParams.get('voice') || 'Aoede';
+  const pageParam = reqUrl.searchParams.get('page') || 'assistant';
+  const topicParam = reqUrl.searchParams.get('topic') || '';
+
+  const voiceName = VALID_LIVE_VOICES.includes(voiceParam) ? voiceParam : 'Aoede';
+  const targetLanguageName = language === 'te' ? 'Telugu (తెలుగు)' : language === 'hi' ? 'Hindi (हिन्दी)' : 'Indian English';
+
+  console.log(`[Gemini Live API] Client connected for ${targetLanguageName} with voice "${voiceName}" on page "${pageParam}"`);
 
   if (!aiClient) {
     clientWs.send(JSON.stringify({
@@ -514,40 +681,73 @@ wss.on('connection', async (clientWs: WebSocket) => {
   }
 
   try {
+    const systemInstruction = `You are VoiceBridge AI, a warm, patient, and conversational voice companion assisting citizens with public services, education scholarships, healthcare schemes, and general everyday inquiries.
+Target Language: ${targetLanguageName}
+
+VOICE-FIRST CONVERSATIONAL PRINCIPLES:
+1. Speak warmly and naturally in ${targetLanguageName}, as if sitting right beside the citizen.
+2. Respond conversationally in 1 to 3 spoken sentences. Avoid monologue-length responses.
+3. NEVER recite markdown symbols, asterisk bolding, bullet points, numbered lists, or raw portal URLs aloud.
+4. If explaining complex paperwork or criteria, use simple everyday examples.
+5. Answer directly without repeating the citizen's entire question.
+6. The user can interrupt you at any moment; adapt fluidly and naturally to their speech.
+${topicParam ? `Active Scheme/Context: ${topicParam}` : ''}
+${pageParam ? `Current App Screen: ${pageParam}` : ''}`;
+
     const session = await aiClient.live.connect({
       model: 'gemini-3.8-live',
       config: {
         responseModalities: [Modality.AUDIO],
         speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Aoede' } },
+          voiceConfig: { prebuiltVoiceConfig: { voiceName } },
         },
-        systemInstruction: `You are VoiceBridge AI, a warm, empathetic, multilingual conversational voice companion sitting beside the citizen.
-You converse naturally in English, Hindi, and Telugu.
-VOICE CONVERSATION RULES:
-1. Speak warmly, with natural cadence and everyday language. Use contractions and varied rhythm.
-2. Respond concisely in 1 to 3 spoken sentences. Avoid long monologues.
-3. NEVER recite bullet points, numbered lists, or URLs aloud.
-4. Never repeat the user's question. Answer directly with clarity.
-5. End with at most one natural follow-up question to check understanding.`
+        inputAudioTranscription: {},
+        outputAudioTranscription: {},
+        systemInstruction
       },
       callbacks: {
         onmessage: (message: LiveServerMessage) => {
-          for (const part of message.serverContent?.modelTurn?.parts ?? []) {
+          const content = message.serverContent;
+
+          // Forward user input transcription from Live API
+          if (content?.inputTranscription?.text) {
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({ inputTranscript: content.inputTranscription.text }));
+            }
+          }
+
+          // Forward model output transcription from Live API
+          if (content?.outputTranscription?.text) {
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({ outputTranscript: content.outputTranscription.text }));
+            }
+          }
+
+          // Forward 24kHz raw PCM audio chunks
+          for (const part of content?.modelTurn?.parts ?? []) {
             if (part.inlineData?.data) {
-              // Send 24kHz base64 PCM audio chunk to client
               if (clientWs.readyState === WebSocket.OPEN) {
                 clientWs.send(JSON.stringify({ audio: part.inlineData.data }));
               }
             }
           }
-          if (message.serverContent?.interrupted) {
+
+          // Forward interruption event
+          if (content?.interrupted) {
             if (clientWs.readyState === WebSocket.OPEN) {
               clientWs.send(JSON.stringify({ interrupted: true }));
             }
           }
+
+          // Forward turn complete event
+          if (content?.turnComplete) {
+            if (clientWs.readyState === WebSocket.OPEN) {
+              clientWs.send(JSON.stringify({ turnComplete: true }));
+            }
+          }
         },
         onclose: () => {
-          console.log('Gemini Live session closed');
+          console.log('[Gemini Live API] Session closed by server');
         }
       }
     });
@@ -559,6 +759,11 @@ VOICE CONVERSATION RULES:
           // Send 16kHz PCM audio chunk to Gemini Live API
           session.sendRealtimeInput({
             audio: { data: parsed.audio, mimeType: 'audio/pcm;rate=16000' }
+          });
+        } else if (parsed.text) {
+          // Send text prompt into the live conversation
+          session.sendRealtimeInput({
+            text: parsed.text
           });
         }
       } catch (err) {
@@ -574,8 +779,13 @@ VOICE CONVERSATION RULES:
       }
     });
 
-    // Notify client that Live session is active
-    clientWs.send(JSON.stringify({ status: 'live_ready', model: 'gemini-3.8-live' }));
+    // Notify client that Live session is active and ready
+    clientWs.send(JSON.stringify({
+      status: 'live_ready',
+      model: 'gemini-3.8-live',
+      language,
+      voice: voiceName
+    }));
   } catch (liveErr: any) {
     console.error('Failed to initiate Gemini 3.8 Live session:', liveErr);
     if (clientWs.readyState === WebSocket.OPEN) {
@@ -588,7 +798,7 @@ VOICE CONVERSATION RULES:
 
 // Handle HTTP upgrade for WebSocket on /api/live
 server.on('upgrade', (request, socket, head) => {
-  const pathname = request.url;
+  const pathname = request.url?.split('?')[0];
   if (pathname === '/api/live') {
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);

@@ -11,33 +11,76 @@ import {
   AlertCircle,
   Sparkles,
   ArrowRight,
-  Filter
+  Filter,
+  Volume2,
+  Search
 } from 'lucide-react';
 import { WorkflowItem, SupportedLanguage, SUPPORTED_LANGUAGES } from '../types';
-import { toggleWorkflowDocument } from '../services/api';
+import { toggleWorkflowDocument, requestPageExplanation } from '../services/api';
+import { voiceEngine } from '../services/voice';
 
 interface WorkflowCenterProps {
   workflows: WorkflowItem[];
   onUpdateWorkflow: (updated: WorkflowItem) => void;
   onStartAssistantWithWorkflow: (workflowId: string, lang: SupportedLanguage) => void;
+  onTriggerPageNarration?: (text: string) => void;
+  selectedLanguage?: SupportedLanguage;
 }
 
 export const WorkflowCenter: React.FC<WorkflowCenterProps> = ({
   workflows,
   onUpdateWorkflow,
-  onStartAssistantWithWorkflow
+  onStartAssistantWithWorkflow,
+  onTriggerPageNarration,
+  selectedLanguage: appSelectedLanguage
 }) => {
   const [selectedCategory, setSelectedCategory] = useState<'all' | 'education' | 'healthcare' | 'public_service'>('all');
   const [activeWorkflowId, setActiveWorkflowId] = useState<string>(workflows[0]?.id || 'wf-scholarship-1');
-  const [displayLanguage, setDisplayLanguage] = useState<SupportedLanguage>('en');
+  const [displayLanguage, setDisplayLanguage] = useState<SupportedLanguage>(appSelectedLanguage || 'en');
   const [updatingDocId, setUpdatingDocId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [isExplaining, setIsExplaining] = useState<boolean>(false);
 
   const activeWorkflow = workflows.find(w => w.id === activeWorkflowId) || workflows[0];
 
   const filteredWorkflows = workflows.filter(wf => {
-    if (selectedCategory === 'all') return true;
-    return wf.category === selectedCategory;
+    const matchesCategory = selectedCategory === 'all' || wf.category === selectedCategory;
+    const matchesSearch = !searchQuery.trim() ||
+      wf.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      wf.description.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      wf.department.toLowerCase().includes(searchQuery.toLowerCase());
+    return matchesCategory && matchesSearch;
   });
+
+  const handleExplainWorkflow = async () => {
+    if (!activeWorkflow) return;
+    setIsExplaining(true);
+    try {
+      const summary = {
+        title: activeWorkflow.title,
+        department: activeWorkflow.department,
+        deadline: activeWorkflow.deadline,
+        progress: `${activeWorkflow.progress}%`,
+        requiredDocuments: activeWorkflow.requiredDocuments.map(d => `${d.name} (${d.submitted ? 'Fulfilled' : 'Pending'})`),
+        keySteps: (activeWorkflow.tasks || []).map(s => s.title)
+      };
+      const text = await requestPageExplanation(
+        'workflow',
+        `Workflow Guide: ${activeWorkflow.title}`,
+        JSON.stringify(summary),
+        displayLanguage
+      );
+      if (onTriggerPageNarration) onTriggerPageNarration(text);
+      else voiceEngine.speak(text, displayLanguage);
+    } catch (err) {
+      console.warn('Explain workflow error:', err);
+      const fallback = `Here is the guide for ${activeWorkflow.title}. It requires ${activeWorkflow.requiredDocuments.length} documents. You have completed ${activeWorkflow.progress}% of this workflow.`;
+      if (onTriggerPageNarration) onTriggerPageNarration(fallback);
+      else voiceEngine.speak(fallback, displayLanguage);
+    } finally {
+      setIsExplaining(false);
+    }
+  };
 
   const handleToggleDoc = async (docId: string, currentStatus: boolean) => {
     if (!activeWorkflow) return;
@@ -84,27 +127,53 @@ export const WorkflowCenter: React.FC<WorkflowCenterProps> = ({
           </p>
         </div>
 
-        {/* Script Selector */}
-        <div className="flex items-center gap-1 self-start md:self-auto bg-[#141311] p-1 rounded-xl border border-[#F5EFE6]/6">
-          <span className="text-[11px] text-[#A89F91] px-2 font-mono">Script:</span>
-          {SUPPORTED_LANGUAGES.map((lang) => (
+        {/* Actions & Script Selector */}
+        <div className="flex flex-wrap items-center gap-2 self-start md:self-auto">
+          {activeWorkflow && (
             <button
-              key={lang.code}
-              onClick={() => setDisplayLanguage(lang.code)}
-              className={`px-3 py-1 text-xs font-medium rounded-lg transition-all cursor-pointer ${
-                displayLanguage === lang.code
-                  ? 'bg-[#C87A4B] text-[#0D0D0C] font-semibold shadow-sm'
-                  : 'text-[#A89F91] hover:text-[#FAF6F0]'
-              }`}
+              onClick={handleExplainWorkflow}
+              disabled={isExplaining}
+              className="px-3.5 py-1.5 text-xs font-medium text-[#FAF6F0] bg-[#141311] hover:bg-[#1A1816] border border-[#C87A4B]/40 hover:border-[#C87A4B] rounded-xl transition-all flex items-center gap-2 cursor-pointer shadow-sm"
+              title="Narrate workflow requirements out loud"
             >
-              {lang.nativeName}
+              <Volume2 className={`w-3.5 h-3.5 text-[#C87A4B] ${isExplaining ? 'animate-pulse' : ''}`} />
+              <span>{isExplaining ? 'Preparing...' : 'Listen & Explain Scheme'}</span>
             </button>
-          ))}
+          )}
+
+          <div className="flex items-center gap-1 bg-[#141311] p-1 rounded-xl border border-[#F5EFE6]/6">
+            <span className="text-[11px] text-[#A89F91] px-2 font-mono">Script:</span>
+            {SUPPORTED_LANGUAGES.map((lang) => (
+              <button
+                key={lang.code}
+                onClick={() => setDisplayLanguage(lang.code)}
+                className={`px-3 py-1 text-xs font-medium rounded-lg transition-all cursor-pointer ${
+                  displayLanguage === lang.code
+                    ? 'bg-[#C87A4B] text-[#0D0D0C] font-semibold shadow-sm'
+                    : 'text-[#A89F91] hover:text-[#FAF6F0]'
+                }`}
+              >
+                {lang.nativeName}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
-      {/* Filter Tabs */}
-      <div className="flex items-center gap-1.5 bg-[#141311] p-1 rounded-xl border border-[#F5EFE6]/6 overflow-x-auto">
+      {/* Search Bar & Filter Tabs */}
+      <div className="space-y-3">
+        <div className="relative">
+          <Search className="w-4 h-4 text-[#A89F91] absolute left-3.5 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search welfare schemes, scholarship criteria, or public health programs..."
+            className="w-full pl-10 pr-4 py-2.5 bg-[#141311] border border-[#F5EFE6]/7 focus:border-[#C87A4B]/50 rounded-xl text-xs text-[#FAF6F0] placeholder-[#A89F91]/50 focus:outline-none transition-colors"
+          />
+        </div>
+
+        <div className="flex items-center gap-1.5 bg-[#141311] p-1 rounded-xl border border-[#F5EFE6]/6 overflow-x-auto">
         <button
           onClick={() => setSelectedCategory('all')}
           className={`px-4 py-2 text-xs font-semibold rounded-lg transition-colors whitespace-nowrap cursor-pointer ${
@@ -149,6 +218,7 @@ export const WorkflowCenter: React.FC<WorkflowCenterProps> = ({
           <span>Public Service Guidance</span>
         </button>
       </div>
+    </div>
 
       {/* Split Layout: Scheme Navigation on Left, Detailed Workspace on Right */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">

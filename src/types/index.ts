@@ -19,6 +19,26 @@ export interface RequiredDocument {
   name_hi: string;
   name_te: string;
   submitted: boolean;
+  category?: DocumentCategory;
+  downloadUrl?: string;
+}
+
+export type DocumentCategory = 'identity' | 'income' | 'residence' | 'education' | 'other';
+
+export interface UserUploadedDocument {
+  id: string;
+  name: string;
+  category: DocumentCategory;
+  fileType: string;
+  fileSize?: number;
+  fileSizeFormatted?: string;
+  uploadedAt: string;
+  dataUrl?: string;
+  status?: string;
+  verificationStatus?: 'pending_verification' | 'submitted' | 'unverified';
+  associatedWorkflowId?: string;
+  linkedWorkflowIds?: string[];
+  notes?: string;
 }
 
 export interface TaskStep {
@@ -53,6 +73,18 @@ export interface WorkflowIntelligence {
   safetyDisclaimer?: string;
 }
 
+export type WorkflowStatus =
+  | 'draft'
+  | 'in_progress'
+  | 'awaiting_documents'
+  | 'ready_for_review'
+  | 'submitted'
+  | 'approved'
+  | 'rejected'
+  | 'closed'
+  | 'pending_verification'
+  | 'completed';
+
 export interface WorkflowItem {
   id: string;
   category: string;
@@ -64,12 +96,14 @@ export interface WorkflowItem {
   description_hi: string;
   description_te: string;
   deadline: string;
-  status: 'draft' | 'in_progress' | 'pending_verification' | 'completed';
+  status: WorkflowStatus;
   progress: number;
   requiredDocuments: RequiredDocument[];
   tasks?: TaskStep[];
   fields?: Record<string, any>;
   isDynamic?: boolean;
+  createdAt?: string;
+  lastUpdated?: string;
 }
 
 export interface ChatMessage {
@@ -79,6 +113,7 @@ export interface ChatMessage {
   language: SupportedLanguage;
   timestamp: string;
   audioPlaying?: boolean;
+  pageContext?: string;
 }
 
 export interface ConversationSession {
@@ -91,6 +126,22 @@ export interface ConversationSession {
   messages: ChatMessage[];
   summary: string;
   intelligence?: WorkflowIntelligence;
+}
+
+export type VoiceStyle = 'natural' | 'professional' | 'friendly' | 'explainer';
+
+export interface VoiceSettings {
+  style: VoiceStyle;
+  rate: number;
+  pitch: number;
+  playbackSpeed: number;
+  preferredVoiceURI?: string;
+}
+
+export interface PageContextInfo {
+  page: string;
+  title: string;
+  dataSummary: Record<string, any> | string;
 }
 
 export interface IntegrationStatus {

@@ -1,12 +1,15 @@
 import React, { useState } from 'react';
-import { History, Play, Clock, Download, Copy, Check, Mic, Volume2 } from 'lucide-react';
+import { History, Play, Clock, Download, Copy, Check, Mic, Volume2, Trash2 } from 'lucide-react';
 import { ConversationSession, SUPPORTED_LANGUAGES, SupportedLanguage } from '../types';
 import { voiceEngine } from '../services/voice';
+import { requestPageExplanation } from '../services/api';
 
 interface HistoryViewProps {
   conversations: ConversationSession[];
   onSelectConversation: (convo: ConversationSession) => void;
   onStartNewConversation: (lang: SupportedLanguage) => void;
+  onDeleteConversation?: (id: string) => void;
+  onTriggerPageNarration?: (text: string) => void;
   selectedLanguage: SupportedLanguage;
 }
 
@@ -14,9 +17,42 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   conversations,
   onSelectConversation,
   onStartNewConversation,
+  onDeleteConversation,
+  onTriggerPageNarration,
   selectedLanguage
 }) => {
   const [playingId, setPlayingId] = useState<string | null>(null);
+  const [isExplaining, setIsExplaining] = useState<boolean>(false);
+
+  const handleExplainHistory = async () => {
+    setIsExplaining(true);
+    try {
+      const summary = {
+        totalConsultations: conversations.length,
+        recentSessions: conversations.slice(0, 5).map(c => ({
+          title: c.title,
+          language: c.language,
+          duration: `${c.durationSeconds}s`,
+          summary: c.summary
+        }))
+      };
+      const text = await requestPageExplanation(
+        'history',
+        'Consultation History Summary',
+        JSON.stringify(summary),
+        selectedLanguage
+      );
+      if (onTriggerPageNarration) onTriggerPageNarration(text);
+      else voiceEngine.speak(text, selectedLanguage);
+    } catch (err) {
+      console.warn('Explain history error:', err);
+      const fallback = `You have ${conversations.length} recorded consultation sessions in your archive. You can replay the synthesized audio or inspect full transcripts.`;
+      if (onTriggerPageNarration) onTriggerPageNarration(fallback);
+      else voiceEngine.speak(fallback, selectedLanguage);
+    } finally {
+      setIsExplaining(false);
+    }
+  };
 
   const handlePlayAudio = (convo: ConversationSession) => {
     if (playingId === convo.id) {
@@ -71,7 +107,19 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-3 self-start sm:self-auto">
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+          {conversations.length > 0 && (
+            <button
+              onClick={handleExplainHistory}
+              disabled={isExplaining}
+              className="px-3.5 py-2 text-xs font-medium text-[#FAF6F0] bg-[#141311] hover:bg-[#1A1816] border border-[#C87A4B]/40 hover:border-[#C87A4B] rounded-xl transition-all flex items-center gap-1.5 cursor-pointer shadow-sm"
+              title="Narrate history overview out loud"
+            >
+              <Volume2 className={`w-3.5 h-3.5 text-[#C87A4B] ${isExplaining ? 'animate-pulse' : ''}`} />
+              <span>{isExplaining ? 'Preparing...' : 'Listen & Explain'}</span>
+            </button>
+          )}
+
           {conversations.length > 0 && (
             <button
               onClick={handleExportAll}
@@ -151,6 +199,20 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
                   >
                     Transcript
                   </button>
+
+                  {onDeleteConversation && (
+                    <button
+                      onClick={() => {
+                        if (window.confirm('Delete this consultation session from your history?')) {
+                          onDeleteConversation(convo.id);
+                        }
+                      }}
+                      className="p-1.5 text-[#A89F91] hover:text-red-400 bg-[#0D0D0C] hover:bg-red-950/30 border border-[#F5EFE6]/8 rounded-lg transition-colors cursor-pointer"
+                      title="Delete session"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
               </div>
             );

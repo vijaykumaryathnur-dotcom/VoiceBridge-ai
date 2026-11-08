@@ -13,13 +13,15 @@ import { GeminiChatbot } from './components/GeminiChatbot';
 import { AudioTranscriber } from './components/AudioTranscriber';
 import { IntegrationsModal } from './components/IntegrationsModal';
 import { TranscriptModal } from './components/TranscriptModal';
+import { GlobalVoiceDock } from './components/GlobalVoiceDock';
 import {
   WorkflowItem,
   ConversationSession,
   SupportedLanguage,
   IntegrationStatus,
   ChatMessage,
-  WorkflowIntelligence
+  WorkflowIntelligence,
+  UserUploadedDocument
 } from './types';
 import { fetchIntegrationStatus, fetchWorkflows, toggleWorkflowDocument, createDynamicWorkflow } from './services/api';
 import { convertIntelligenceToWorkflow } from './services/workflowEngine';
@@ -117,6 +119,42 @@ const INITIAL_CONVERSATIONS: ConversationSession[] = [
   }
 ];
 
+const INITIAL_DOCUMENTS: UserUploadedDocument[] = [
+  {
+    id: 'doc-seed-1',
+    name: 'Aadhaar_Card_Masked_FrontBack.pdf',
+    category: 'identity',
+    fileType: 'application/pdf',
+    fileSizeFormatted: '1.4 MB',
+    uploadedAt: 'Today, 9:30 AM',
+    status: 'verified',
+    dataUrl: '',
+    linkedWorkflowIds: ['wf-scholarship-1', 'wf-health-1', 'wf-public-1']
+  },
+  {
+    id: 'doc-seed-2',
+    name: 'Tehsildar_Income_Certificate_2026.pdf',
+    category: 'income',
+    fileType: 'application/pdf',
+    fileSizeFormatted: '820 KB',
+    uploadedAt: 'Yesterday, 3:15 PM',
+    status: 'uploaded',
+    dataUrl: '',
+    linkedWorkflowIds: ['wf-scholarship-1']
+  },
+  {
+    id: 'doc-seed-3',
+    name: 'Electricity_Bill_Latest_AddressProof.jpg',
+    category: 'residence',
+    fileType: 'image/jpeg',
+    fileSizeFormatted: '640 KB',
+    uploadedAt: 'Oct 28, 2026',
+    status: 'uploaded',
+    dataUrl: '',
+    linkedWorkflowIds: ['wf-public-1']
+  }
+];
+
 export default function App() {
   const [currentView, setCurrentView] = useState<NavigationTarget>('assistant');
   const [workflows, setWorkflows] = useState<WorkflowItem[]>([]);
@@ -133,6 +171,17 @@ export default function App() {
       return INITIAL_CONVERSATIONS;
     }
   });
+
+  const [uploadedDocuments, setUploadedDocuments] = useState<UserUploadedDocument[]>(() => {
+    try {
+      const saved = localStorage.getItem('voicebridge_uploaded_docs');
+      return saved ? JSON.parse(saved) : INITIAL_DOCUMENTS;
+    } catch {
+      return INITIAL_DOCUMENTS;
+    }
+  });
+
+  const [globalNarrationText, setGlobalNarrationText] = useState<string | null>(null);
 
   const [integrationStatus, setIntegrationStatus] = useState<IntegrationStatus | null>(null);
   const [isIntegrationsModalOpen, setIsIntegrationsModalOpen] = useState<boolean>(false);
@@ -175,6 +224,46 @@ export default function App() {
         return { ...w, requiredDocuments: docs, progress };
       }));
     }
+  };
+
+  const handleUploadDocument = (doc: UserUploadedDocument) => {
+    const updated = [doc, ...uploadedDocuments];
+    setUploadedDocuments(updated);
+    try {
+      localStorage.setItem('voicebridge_uploaded_docs', JSON.stringify(updated));
+    } catch (e) {
+      console.warn('Storage write notice:', e);
+    }
+    setSaveToast(`Document "${doc.name}" saved to your Secure Vault.`);
+    setTimeout(() => setSaveToast(null), 3500);
+  };
+
+  const handleDeleteDocument = (docId: string) => {
+    const updated = uploadedDocuments.filter(d => d.id !== docId);
+    setUploadedDocuments(updated);
+    try {
+      localStorage.setItem('voicebridge_uploaded_docs', JSON.stringify(updated));
+    } catch (e) {
+      console.warn('Storage write notice:', e);
+    }
+    setSaveToast('Document deleted from vault.');
+    setTimeout(() => setSaveToast(null), 3000);
+  };
+
+  const handleDeleteConversation = (convoId: string) => {
+    const updated = recentConversations.filter(c => c.id !== convoId);
+    setRecentConversations(updated);
+    try {
+      localStorage.setItem('voicebridge_conversations_redesign', JSON.stringify(updated));
+    } catch (e) {
+      console.warn('Storage write notice:', e);
+    }
+    setSaveToast('Consultation removed from history.');
+    setTimeout(() => setSaveToast(null), 3000);
+  };
+
+  const handleTriggerPageNarration = (text: string) => {
+    setGlobalNarrationText(text);
   };
 
   const handleStartVoice = (wfId?: string, lang?: SupportedLanguage) => {
@@ -250,6 +339,54 @@ export default function App() {
 
   const activeWorkflow = workflows.find(w => w.id === activeWorkflowId) || workflows[0] || null;
 
+  // Compute Page Info for Global Dock
+  const getPageInfo = () => {
+    switch (currentView) {
+      case 'dashboard':
+        return {
+          title: 'Citizen Portal & Dashboard',
+          summary: `${workflows.length} active applications, ${uploadedDocuments.length} documents in vault, ${recentConversations.length} consultations.`
+        };
+      case 'applications':
+        return {
+          title: 'Active Applications & Milestones',
+          summary: `${workflows.length} public applications being tracked with official portals.`
+        };
+      case 'documents':
+        return {
+          title: 'Documents Vault & Attestation',
+          summary: `${uploadedDocuments.length} documents stored (${uploadedDocuments.filter(d => d.status === 'verified').length} verified, ${uploadedDocuments.filter(d => d.status === 'uploaded').length} pending review).`
+        };
+      case 'workflows':
+        return {
+          title: 'Welfare Workflows Directory',
+          summary: `${workflows.length} active service guides and prerequisites.`
+        };
+      case 'services':
+        return {
+          title: 'Capabilities & Services Discovery',
+          summary: '10 civic and open-ended assistance domains available.'
+        };
+      case 'history':
+        return {
+          title: 'Consultation Transcripts & Audio',
+          summary: `${recentConversations.length} recorded voice inquiries.`
+        };
+      case 'assistant':
+        return {
+          title: 'Voice Assistant Interactive Session',
+          summary: activeWorkflow ? `Guided session on ${activeWorkflow.title}` : 'Open-ended voice consultation'
+        };
+      default:
+        return {
+          title: 'VoiceBridge AI',
+          summary: 'Multilingual voice assistant for public welfare and civic services.'
+        };
+    }
+  };
+
+  const pageInfo = getPageInfo();
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#0D0D0C] text-[#F5EFE6] font-sans selection:bg-[#C87A4B]/30 selection:text-[#E0A364]">
       
@@ -272,7 +409,7 @@ export default function App() {
         <header className="md:hidden flex items-center justify-between px-4 py-3 bg-[#121110] border-b border-[#F5EFE6]/7 shrink-0 z-20">
           <button
             onClick={() => setMobileMenuOpen(true)}
-            className="p-1.5 text-[#A89F91] hover:text-[#F5EFE6] rounded-lg"
+            className="p-1.5 text-[#A89F91] hover:text-[#F5EFE6] rounded-lg cursor-pointer"
             aria-label="Open navigation menu"
           >
             <Menu className="w-5 h-5" />
@@ -308,7 +445,7 @@ export default function App() {
         </div>
 
         {/* Scrollable View Content */}
-        <main className="flex-1 overflow-y-auto flex flex-col">
+        <main className="flex-1 overflow-y-auto flex flex-col pb-24">
           {currentView === 'landing' && (
             <LandingPage
               onStartAssistant={(lang, wfId) => handleStartVoice(wfId, lang)}
@@ -320,6 +457,7 @@ export default function App() {
             <ExploreServicesView
               onStartWithPrompt={(prompt, lang) => handleStartVoiceWithPrompt(prompt, lang)}
               selectedLanguage={selectedLanguage}
+              onTriggerPageNarration={handleTriggerPageNarration}
             />
           )}
 
@@ -344,12 +482,15 @@ export default function App() {
             <Dashboard
               workflows={workflows}
               recentConversations={recentConversations}
+              uploadedDocumentsCount={uploadedDocuments.length}
               onStartConversation={(lang, wfId) => handleStartVoice(wfId, lang)}
               onOpenWorkflow={(wfId) => {
                 setActiveWorkflowId(wfId);
                 setCurrentView('workflows');
               }}
               onSelectConversation={(convo) => setActiveTranscriptConvo(convo)}
+              onTriggerPageNarration={handleTriggerPageNarration}
+              selectedLanguage={selectedLanguage}
             />
           )}
 
@@ -358,6 +499,8 @@ export default function App() {
               workflows={workflows}
               onUpdateWorkflow={(up) => setWorkflows(prev => prev.map(w => w.id === up.id ? up : w))}
               onStartAssistantWithWorkflow={(wfId, lang) => handleStartVoice(wfId, lang)}
+              onTriggerPageNarration={handleTriggerPageNarration}
+              selectedLanguage={selectedLanguage}
             />
           )}
 
@@ -370,15 +513,20 @@ export default function App() {
               }}
               onStartAssistantWithWorkflow={(id, lang) => handleStartVoice(id, lang)}
               selectedLanguage={selectedLanguage}
+              onTriggerPageNarration={handleTriggerPageNarration}
             />
           )}
 
           {currentView === 'documents' && (
             <DocumentsView
               workflows={workflows}
+              uploadedDocuments={uploadedDocuments}
+              onUploadDocument={handleUploadDocument}
+              onDeleteDocument={handleDeleteDocument}
               onToggleDocument={handleToggleDocument}
               onStartAssistantWithWorkflow={(id, lang) => handleStartVoice(id, lang)}
               selectedLanguage={selectedLanguage}
+              onTriggerPageNarration={handleTriggerPageNarration}
             />
           )}
 
@@ -387,6 +535,8 @@ export default function App() {
               conversations={recentConversations}
               onSelectConversation={(convo) => setActiveTranscriptConvo(convo)}
               onStartNewConversation={(lang) => handleStartVoice(undefined, lang)}
+              onDeleteConversation={handleDeleteConversation}
+              onTriggerPageNarration={handleTriggerPageNarration}
               selectedLanguage={selectedLanguage}
             />
           )}
@@ -430,20 +580,33 @@ export default function App() {
         </div>
       )}
 
+      {/* 4. Global Persistent Voice Assistant Dock across all views */}
+      <GlobalVoiceDock
+        currentPage={currentView}
+        pageTitle={pageInfo.title}
+        pageDataSummary={pageInfo.summary}
+        currentLanguage={selectedLanguage}
+        onLanguageChange={setSelectedLanguage}
+        externalNarrationText={globalNarrationText}
+        onClearNarration={() => setGlobalNarrationText(null)}
+        onNavigate={(target: string) => setCurrentView(target as NavigationTarget)}
+      />
+
       {/* Save Notification Toast */}
       {saveToast && (
-        <div className="fixed bottom-6 right-6 z-50 px-4 py-2.5 rounded-xl bg-[#181614] border border-[#C87A4B]/60 text-[#F5EFE6] text-xs shadow-2xl flex items-center gap-2 animate-in slide-in-from-bottom-2 duration-200">
+        <div className="fixed bottom-6 left-6 z-50 px-4 py-2.5 rounded-xl bg-[#181614] border border-[#C87A4B]/60 text-[#F5EFE6] text-xs shadow-2xl flex items-center gap-2 animate-in slide-in-from-bottom-2 duration-200">
           <span className="w-2 h-2 rounded-full bg-[#C87A4B]" />
           <span>{saveToast}</span>
         </div>
       )}
 
-      {/* Integrations Modal */}
+      {/* Integrations & Voice Settings Modal */}
       <IntegrationsModal
         isOpen={isIntegrationsModalOpen}
         onClose={() => setIsIntegrationsModalOpen(false)}
         status={integrationStatus}
         onRefresh={loadStatus}
+        selectedLanguage={selectedLanguage}
       />
 
       {/* Transcript Modal */}
